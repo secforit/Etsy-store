@@ -1,0 +1,26 @@
+{
+  "region": "US",
+  "note": "US seasonal moments for print-on-demand. Dates: fixed (month/day), nth_weekday (weekday 0=Sun..6=Sat), last_weekday, easter (+offsetDays). Keywords avoid trademarked event names (no 'Super Bowl', 'March Madness').",
+  "events": [
+    { "id": "new_year", "name": "New Year", "date": { "type": "fixed", "month": 1, "day": 1 }, "keywords": ["new year", "new year resolution", "new year party"] },
+    { "id": "valentines_day", "name": "Valentine's Day", "date": { "type": "fixed", "month": 2, "day": 14 }, "keywords": ["valentines day", "valentine gift", "galentines day", "anti valentine"] },
+    { "id": "pi_day", "name": "Pi Day", "date": { "type": "fixed", "month": 3, "day": 14 }, "keywords": ["pi day", "math teacher gift"] },
+    { "id": "st_patricks_day", "name": "St. Patrick's Day", "date": { "type": "fixed", "month": 3, "day": 17 }, "keywords": ["st patricks day", "shamrock", "lucky clover"] },
+    { "id": "easter", "name": "Easter", "date": { "type": "easter", "offsetDays": 0 }, "keywords": ["easter", "easter bunny", "spring vibes"] },
+    { "id": "earth_day", "name": "Earth Day", "date": { "type": "fixed", "month": 4, "day": 22 }, "keywords": ["earth day", "nature lover", "plant lover"] },
+    { "id": "teacher_appreciation", "name": "Teacher Appreciation Week", "date": { "type": "nth_weekday", "month": 5, "weekday": 1, "n": 1 }, "keywords": ["teacher appreciation", "teacher gift", "teacher life"] },
+    { "id": "mothers_day", "name": "Mother's Day", "date": { "type": "nth_weekday", "month": 5, "weekday": 0, "n": 2 }, "keywords": ["mothers day", "mom gift", "dog mom", "cat mom"] },
+    { "id": "graduation", "name": "Graduation season", "date": { "type": "fixed", "month": 5, "day": 25 }, "keywords": ["graduation gift", "class of", "nurse graduation"] },
+    { "id": "memorial_day", "name": "Memorial Day", "date": { "type": "last_weekday", "month": 5, "weekday": 1 }, "keywords": ["summer kickoff", "lake life", "camping"] },
+    { "id": "pride_month", "name": "Pride Month", "date": { "type": "fixed", "month": 6, "day": 1 }, "keywords": ["pride", "love is love", "rainbow"] },
+    { "id": "fathers_day", "name": "Father's Day", "date": { "type": "nth_weekday", "month": 6, "weekday": 0, "n": 3 }, "keywords": ["fathers day", "dad gift", "dad jokes", "fishing dad"] },
+    { "id": "independence_day", "name": "Independence Day", "date": { "type": "fixed", "month": 7, "day": 4 }, "keywords": ["fourth of july", "4th of july", "patriotic", "usa"] },
+    { "id": "back_to_school", "name": "Back to school", "date": { "type": "fixed", "month": 8, "day": 15 }, "keywords": ["back to school", "teacher shirt", "first day of school"] },
+    { "id": "dog_day", "name": "National Dog Day", "date": { "type": "fixed", "month": 8, "day": 26 }, "keywords": ["dog lover", "dog dad", "rescue dog"] },
+    { "id": "labor_day", "name": "Labor Day", "date": { "type": "nth_weekday", "month": 9, "weekday": 1, "n": 1 }, "keywords": ["end of summer", "labor day"] },
+    { "id": "fall", "name": "Fall season", "date": { "type": "fixed", "month": 9, "day": 22 }, "keywords": ["fall vibes", "pumpkin spice", "autumn leaves", "cozy season"] },
+    { "id": "halloween", "name": "Halloween", "date": { "type": "fixed", "month": 10, "day": 31 }, "keywords": ["halloween", "spooky season", "witchy", "ghost"] },
+    { "id": "thanksgiving", "name": "Thanksgiving", "date": { "type": "nth_weekday", "month": 11, "weekday": 4, "n": 4 }, "keywords": ["thanksgiving", "thankful", "turkey day", "friendsgiving"] },
+    { "id": "christmas", "name": "Christmas", "date": { "type": "fixed", "month": 12, "day": 25 }, "keywords": ["christmas", "christmas gift", "ugly christmas", "holiday season", "winter vibes"] }
+  ]
+}

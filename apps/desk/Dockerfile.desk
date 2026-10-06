@@ -1,0 +1,50 @@
+# syntax=docker/dockerfile:1.7
+#
+# Approval desk (Next.js standalone). Build from the REPOSITORY ROOT:
+#   docker build -f apps/desk/Dockerfile.desk -t etsy-agents-desk .
+# Compose: build: { context: .., dockerfile: apps/desk/Dockerfile.desk }
+# BuildKit uses apps/desk/Dockerfile.desk.dockerignore for this build (keeps .env, node_modules, data out).
+#
+# Runtime: listens on 0.0.0.0:3000 INSIDE the container; compose publishes it on 127.0.0.1:3000 only and
+# Razvan reaches it through `tailscale serve` (HTTPS), so the Secure session cookie works.
+# Needs at runtime: the env from .env (loadEnv), DESK_PASSWORD_HASH, DESK_SESSION_SECRET, DESK_ORIGIN,
+# and the blob storage volume at STORAGE_DIR (writable by uid 1000).
+
+ARG NODE_IMAGE=node:22-slim
+
+# ---- deps: install the workspace from the lockfile --------------------------------------------------
+FROM ${NODE_IMAGE} AS deps
+WORKDIR /app
+ENV NEXT_TELEMETRY_DISABLED=1
+COPY package.json package-lock.json tsconfig.base.json ./
+# Every workspace manifest recorded in package-lock.json must be present for `npm ci`.
+COPY packages/core/package.json packages/core/package.json
+COPY apps/desk/package.json apps/desk/package.json
+COPY apps/worker/package.json apps/worker/package.json
+RUN npm ci --no-audit --no-fund
+
+# ---- build: next build (no secrets needed; every page is rendered per request) ----------------------
+FROM deps AS build
+COPY packages/core packages/core
+COPY apps/desk apps/desk
+RUN cd apps/desk && MODE=mock npx next build
+
+# ---- runtime: standalone server only, non-root, code owned by root (read-only for the app user) -----
+FROM ${NODE_IMAGE} AS runtime
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1 \
+    PORT=3000 \
+    HOSTNAME=0.0.0.0
+WORKDIR /app
+# The standalone output mirrors the monorepo: /app/apps/desk/server.js, /app/node_modules,
+# /app/packages/core/src/db/migrations (traced for the DB layer).
+COPY --from=build /app/apps/desk/.next/standalone ./
+COPY --from=build /app/apps/desk/.next/static ./apps/desk/.next/static
+COPY --from=build /app/apps/desk/public ./apps/desk/public
+# Only Next's cache dir is writable (mount a tmpfs here when the root filesystem is read-only).
+RUN mkdir -p /app/apps/desk/.next/cache && chown node:node /app/apps/desk/.next/cache
+USER node
+EXPOSE 3000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD ["node", "-e", "fetch('http://127.0.0.1:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+CMD ["node", "apps/desk/server.js"]

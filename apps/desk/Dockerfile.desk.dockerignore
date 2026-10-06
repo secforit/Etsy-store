@@ -1,0 +1,20 @@
+# Build-context filter for apps/desk/Dockerfile.desk (BuildKit picks up <Dockerfile>.dockerignore).
+# Never send secrets, local data or build output to the builder.
+**/node_modules
+**/.next
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/secrets
+data
+**/data/blobs
+**/*.log
+**/coverage
+**/dist
+**/.DS_Store
+**/.turbo
+.git
+apps/imagegen
+deploy
+docs
