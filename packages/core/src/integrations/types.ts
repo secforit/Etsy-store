@@ -165,6 +165,28 @@ export interface ImageTools {
   toPrintFile(bytes: Uint8Array, spec: { widthPx: number; heightPx: number; dpi: number }): Promise<Uint8Array>;
 }
 
+/* --------------------------- Local GPU (RTX 3060) ------------------------- */
+
+/**
+ * One 12 GB GPU is shared by Ollama (LLM, ~8 GB for gemma4:12b at 16k ctx) and the imagegen sidecar
+ * (FLUX.2 klein 4B with CPU offload, BiRefNet, Real-ESRGAN). They cannot both hold VRAM at once.
+ * Every GPU call goes through withGpu(): calls are serialised, and before switching owner the coordinator
+ * asks the previous owner to release VRAM (Ollama: keep_alive 0; sidecar: POST /unload).
+ */
+export type GpuOwner = 'llm' | 'image';
+
+export interface GpuCoordinator {
+  withGpu<T>(owner: GpuOwner, fn: () => Promise<T>): Promise<T>;
+}
+
+/** AI upscaler (Real-ESRGAN x4 on the sidecar). Output is PNG; alpha preserved. */
+export interface ImageUpscaler {
+  upscale(bytes: Uint8Array, factor: 2 | 4): Promise<Uint8Array>;
+}
+
+/** Fetches an image from a third-party URL through the SSRF-safe allowlisted fetcher. */
+export type AllowlistedImageFetcher = (url: string) => Promise<{ bytes: Uint8Array; mimeType: string }>;
+
 /* ------------------------------ Bundle ------------------------------------ */
 
 export interface Integrations {
@@ -175,4 +197,10 @@ export interface Integrations {
   trendSources: TrendSource[];
   storage: BlobStorage;
   imageTools: ImageTools;
+  /** Present for the local GPU stack (always present in mock mode as a no-op serialiser). */
+  gpu: GpuCoordinator;
+  /** Present when the imagegen sidecar is configured (and in mock mode). */
+  upscaler: ImageUpscaler | null;
+  /** For Printify mockup URLs (QA vision check). */
+  fetchImage: AllowlistedImageFetcher;
 }

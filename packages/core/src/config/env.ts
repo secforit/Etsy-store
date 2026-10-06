@@ -19,10 +19,43 @@ const EnvSchema = z
     /** Root directory for blob storage (designs, print files, mockups). */
     STORAGE_DIR: nonEmpty.default('./data/blobs'),
 
+    /**
+     * LLM routing. Default: every agent runs on the local Ollama server on Razvan's RTX 3060.
+     * LLM_ROUTES overrides per agent, e.g. {"compliance_guard":"anthropic"}.
+     */
+    LLM_DEFAULT_PROVIDER: z.enum(['ollama', 'anthropic']).default('ollama'),
+    LLM_ROUTES: z
+      .string()
+      .optional()
+      .transform((s, ctx) => {
+        if (!s) return {} as Record<string, 'ollama' | 'anthropic'>;
+        try {
+          const parsed = z.record(z.string(), z.enum(['ollama', 'anthropic'])).parse(JSON.parse(s));
+          return parsed;
+        } catch {
+          ctx.addIssue({ code: 'custom', message: 'LLM_ROUTES must be JSON like {"compliance_guard":"anthropic"}' });
+          return z.NEVER;
+        }
+      }),
+
+    /** Local models (Ollama, GPU). Apache-2.0 models that fit 12 GB VRAM; see docs/MODELS.md. */
+    OLLAMA_BASE_URL: z.url().default('http://ollama:11434'),
+    OLLAMA_MODEL_LARGE: nonEmpty.default('gemma4:12b'),
+    OLLAMA_MODEL_SMALL: nonEmpty.default('gemma4:12b'),
+    OLLAMA_MODEL_VISION: nonEmpty.default('gemma4:12b'),
+    /** Context window requested from Ollama; 16k keeps gemma4:12b around 8 GB VRAM. */
+    OLLAMA_NUM_CTX: z.coerce.number().int().min(2048).max(262144).default(16384),
+
     ANTHROPIC_API_KEY: nonEmpty.optional(),
-    /** Model ids are configuration, not code: set them to current Claude model ids. */
+    /** Only needed when a route uses 'anthropic'. Model ids are configuration, not code. */
     ANTHROPIC_MODEL_LARGE: nonEmpty.optional(),
     ANTHROPIC_MODEL_SMALL: nonEmpty.optional(),
+
+    /** Image generation: 'local' = the imagegen GPU sidecar (FLUX.2 klein 4B + BiRefNet + Real-ESRGAN). */
+    IMAGEGEN_PROVIDER: z.enum(['local', 'recraft']).default('local'),
+    IMAGEGEN_BASE_URL: z.url().default('http://imagegen:8000'),
+    /** Shared secret the worker sends to the imagegen sidecar (internal network, defence in depth). */
+    IMAGEGEN_TOKEN: z.string().min(24).optional(),
 
     ETSY_API_KEY: nonEmpty.optional(),
     ETSY_SHARED_SECRET: nonEmpty.optional(),
@@ -42,15 +75,13 @@ const EnvSchema = z
     /** Approval desk: scrypt hash of Razvan's password, and a >=32 byte session secret. */
     DESK_PASSWORD_HASH: nonEmpty.optional(),
     DESK_SESSION_SECRET: z.string().min(32).optional(),
+    /** The desk's public origin, e.g. https://secforit-home.<tailnet>.ts.net (served over Tailscale). */
     DESK_ORIGIN: z.url().optional(),
   })
   .superRefine((env, ctx) => {
     if (env.MODE !== 'live') return;
     const required: (keyof typeof env)[] = [
       'DATABASE_URL',
-      'ANTHROPIC_API_KEY',
-      'ANTHROPIC_MODEL_LARGE',
-      'ANTHROPIC_MODEL_SMALL',
       'ETSY_API_KEY',
       'ETSY_SHOP_ID',
       'ETSY_REFRESH_TOKEN',
@@ -58,8 +89,12 @@ const EnvSchema = z
       'PRINTIFY_SHOP_ID',
       'MARKER_API_USERNAME',
       'MARKER_API_PASSWORD',
-      'RECRAFT_API_KEY',
     ];
+    const usesAnthropic =
+      env.LLM_DEFAULT_PROVIDER === 'anthropic' || Object.values(env.LLM_ROUTES).includes('anthropic');
+    if (usesAnthropic) required.push('ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL_LARGE', 'ANTHROPIC_MODEL_SMALL');
+    if (env.IMAGEGEN_PROVIDER === 'recraft') required.push('RECRAFT_API_KEY');
+    if (env.IMAGEGEN_PROVIDER === 'local') required.push('IMAGEGEN_TOKEN');
     for (const key of required) {
       if (!env[key]) ctx.addIssue({ code: 'custom', path: [key], message: `${key} is required when MODE=live` });
     }

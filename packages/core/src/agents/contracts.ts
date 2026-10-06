@@ -7,10 +7,12 @@ import { z } from 'zod';
 import type { ShopConfig } from '../config/shop.ts';
 import type { ProductType, TrademarkHit } from '../domain/types.ts';
 import type {
+  AllowlistedImageFetcher,
   BlobStorage,
   EtsyClient,
   ImageGenClient,
   ImageTools,
+  ImageUpscaler,
   PrintifyClient,
   TrademarkClient,
   TrendSignalInput,
@@ -218,6 +220,10 @@ export interface QaPublisherDeps extends BaseDeps {
   printify: PrintifyClient;
   storage: BlobStorage;
   imageTools: ImageTools;
+  /** AI upscaler for edited files smaller than the print spec; null = sharp-only resize (max 4x). */
+  upscaler: ImageUpscaler | null;
+  /** SSRF-safe fetcher for Printify mockup URLs (vision check). */
+  fetchImage: AllowlistedImageFetcher;
 }
 
 export const QaPublisherOutputSchema = z.discriminatedUnion('status', [

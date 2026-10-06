@@ -46,6 +46,16 @@ export const SHOP = {
     poster: { enabled: true, printifyBlueprintId: null, printifyPrintProviderId: null, printSpec: null },
   } satisfies Record<ProductType, ProductConfig>,
 
+  imageGen: {
+    /**
+     * Raw art is generated on the RTX 3060 at about 1/3 of the print size (dimensions rounded to multiples of 16),
+     * Razvan edits it, then QA upscales it to the print spec with Real-ESRGAN.
+     */
+    generationScale: 1 / 3,
+    /** Used when a product's printSpec is not known yet. */
+    defaultSizePx: { widthPx: 1536, heightPx: 1536 },
+  },
+
   pricing: {
     /** Minimum share of the sale price kept after Printify cost and Etsy fees. */
     minMarginShare: 0.25,
