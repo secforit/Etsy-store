@@ -1,0 +1,9 @@
+{
+  "name": "@etsy-agents/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@etsy-agents/core": "0.1.0"
+  }
+}

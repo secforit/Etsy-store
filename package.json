@@ -1,0 +1,28 @@
+{
+  "name": "etsy-agents",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Self-hosted multi-agent pipeline: trend research to original print-on-demand designs to Etsy drafts, with human approval.",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "typecheck": "tsc -p packages/core/tsconfig.json --noEmit && tsc -p apps/worker/tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "demo": "tsx apps/worker/src/cli.ts demo",
+    "worker": "tsx apps/worker/src/cli.ts run",
+    "migrate": "tsx apps/worker/src/cli.ts migrate"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^5.0.3"
+  }
+}
