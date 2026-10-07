@@ -42,5 +42,7 @@ upscaling. Details and how to swap: [docs/MODELS.md](docs/MODELS.md).
 The full history ships as `etsy-agents.bundle`. To restore it in this folder:
 
 ```bash
-git init -b master && git fetch etsy-agents.bundle master && git reset FETCH_HEAD && git status
+git init -b master && git fetch etsy-agents.bundle master && git reset FETCH_HEAD && git checkout -- . && git status
 ```
+
+`git checkout -- .` also restores the executable bit on `deploy/*.sh`, which a plain file copy can drop.
