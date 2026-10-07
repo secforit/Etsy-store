@@ -1,4 +1,8 @@
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
+import { createPgliteDb } from '../db/db.ts';
 import { loadEnv } from '../config/env.ts';
 import { cloudModelsWithoutPrice, loadOrchestratorEnv, scopeEnvForLoad } from './config.ts';
 import { assertCloudModelsPriced, buildRuntime } from './runtime.ts';
@@ -91,5 +95,35 @@ describe('live start-up refuses unpriced cloud models (spend cap fails closed)',
     });
     const raw = { ...liveEnv, LLM_PRICES_JSON: prices };
     expect(() => assertCloudModelsPriced(loadEnv(raw), raw)).not.toThrow();
+  });
+});
+
+describe('desk runtime (least privilege)', () => {
+  it("starts without the worker's secrets and never calls a model or a worker-only client", async () => {
+    // The desk container: no Marker, imagegen or Anthropic keys and no prices, even if cloud routing leaked in.
+    const raw: Record<string, string> = {
+      MODE: 'live',
+      DATABASE_URL: 'postgres://u:p@127.0.0.1:1/db',
+      STORAGE_DIR: path.join(os.tmpdir(), 'desk-runtime-test'),
+      ETSY_API_KEY: 'k',
+      ETSY_SHARED_SECRET: 's',
+      ETSY_SHOP_ID: '1',
+      ETSY_REFRESH_TOKEN: 'r',
+      PRINTIFY_API_TOKEN: 't',
+      PRINTIFY_SHOP_ID: '2',
+      LLM_ROUTES: '{"compliance_guard":"anthropic"}',
+    };
+    const env = loadEnv(raw, { scope: 'desk' });
+    const db = await createPgliteDb();
+    try {
+      const runtime = await buildRuntime(env, { scope: 'desk', db, rawEnv: raw, component: 'desk' });
+      await expect(
+        runtime.deps.llm.generate({ agent: 'analyst', tier: 'small', system: 's', instructions: 'i', untrustedData: {}, schema: z.object({}) }),
+      ).rejects.toThrow(/does not call language models/);
+      expect(() => runtime.deps.integrations.trademark.search('x')).toThrow(/not available in the approval desk/);
+      await runtime.close();
+    } finally {
+      await db.close();
+    }
   });
 });

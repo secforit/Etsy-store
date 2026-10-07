@@ -14,25 +14,31 @@ root (for example `~/etsy-agents`) as your normal user, after it has been added 
 ## 1. What runs
 
 `./deploy/compose.sh` wraps `docker compose` with the project name `etsy-agents`, `deploy/docker-compose.yml`
-and the repository's `.env`. Use it for every command below.
+and the repository's env files (section 4). Before every command it runs `deploy/check-env.sh`, which refuses to
+continue when an env file is readable by others or a secret sits in a file that another container reads. Use it
+for every command below.
 
 | Service | What it does | GPU | Network | Data |
 | --- | --- | --- | --- | --- |
-| `postgres` | Database (`postgres:16-alpine`, uid 70) | no | backend | volume `pgdata` |
-| `ollama` | Local LLM server, one model loaded, one request at a time | yes | backend, egress | volume `ollama` |
-| `imagegen` | FLUX.2 klein 4B / BiRefNet / Real-ESRGAN sidecar, bearer token required | yes | backend, egress | volume `hf-models` (`/models`) |
+| `postgres` | Database (`postgres:16.15-alpine3.24`, pinned by digest, uid 70) | no | backend | volume `pgdata` |
+| `ollama` | Local LLM server, one model loaded, one request at a time | yes | backend | volume `ollama` |
+| `imagegen` | FLUX.2 klein 4B / BiRefNet / Real-ESRGAN sidecar, bearer token required, offline | yes | backend | volume `hf-models` (`/models`) |
 | `migrate` | One-shot: SQL migrations, before worker and desk start | no | backend | |
 | `worker` | The orchestrator: one job at a time, daily trend scan, hourly analyze | no | backend, egress | volume `blobs` |
 | `desk` | Approval desk (Next.js) on `127.0.0.1:3000` | no | backend, egress | volume `blobs` |
 | `init-volumes` | One-shot: gives the `blobs` and `ollama` volumes to uid 1000 | no | none | |
-| `ollama-pull` | One-shot (profile `setup`): downloads `gemma4:12b` | no | backend | |
+| `ollama-pull` | One-shot (profile `setup`): downloads `gemma4:12b` into the `ollama` volume | no | egress | volume `ollama` |
+| `imagegen-download` | One-shot (profile `setup`): downloads the pinned sidecar weights | no | egress | volume `hf-models` |
 
-`backend` is an internal network (no internet). `egress` gives outbound internet to the services that need it:
-Etsy, Printify and Marker APIs for worker and desk, model downloads for ollama and imagegen. Postgres never
-gets internet access.
+`backend` is an internal network (no internet). `egress` gives outbound internet only to what needs it at run
+time: the worker (Etsy, Printify, Marker, optional cloud APIs) and the desk (Etsy, Printify). Postgres, Ollama and
+the imagegen sidecar never get internet access; model downloads happen only in the two one-shot setup services
+(section 6).
 
-Every container runs as a non-root user with `no-new-privileges`, all capabilities dropped, and (except the
-imagegen sidecar) a read-only root filesystem. Logs are rotated (10 MB x 5 per container).
+Every container runs as a non-root user with `no-new-privileges`, all capabilities dropped and a read-only root
+filesystem; the long-running ones also have memory and PID limits (`LIMIT_MEM_*` in `.env` to change the memory
+ones). Third-party images (Postgres, busybox, Ollama, Node, CUDA, uv) are pinned by version and digest. Logs are
+rotated (10 MB x 5 per container).
 
 The pipeline per product:
 
@@ -103,20 +109,29 @@ the toolkit is not registered: rerun `nvidia-ctk runtime configure` and restart 
 If the host has a desktop session, it also uses VRAM (often 300 to 800 MB). The server needs every MB:
 `sudo systemctl set-default multi-user.target && sudo reboot` disables the graphical login.
 
-## 4. Get the code and fill `.env`
+## 4. Get the code and fill the env files
+
+Secrets are split per container, so a bug in one service cannot read the keys of another:
+
+| File | Read by | Holds |
+| --- | --- | --- |
+| `.env` | migrate, worker, desk, compose | `MODE`, database, Etsy, Printify, worker settings, container limits |
+| `.env.worker` | worker, compose (imagegen gets `IMAGEGEN_TOKEN` from it) | imagegen token, Marker, LLM routing and cloud keys, Recraft, Pinterest |
+| `.env.desk` | desk | `DESK_PASSWORD_HASH`, `DESK_SESSION_SECRET`, `DESK_ORIGIN` |
+| `.env.imagegen` (optional) | `imagegen-download` only | `HF_TOKEN` |
 
 ```bash
 cd ~/etsy-agents
-cp .env.example .env
-chmod 600 .env           # compose.sh refuses to run when .env is readable by others
+for f in .env .env.worker .env.desk; do cp "$f.example" "$f"; done
+chmod 600 .env .env.worker .env.desk     # compose.sh refuses env files readable by others
 ```
 
-Generate the infrastructure secrets (each command fills an empty line of `.env.example` in place):
+Generate the infrastructure secrets (each command fills an empty line of the template in place):
 
 ```bash
 sed -i "s/^POSTGRES_PASSWORD=$/POSTGRES_PASSWORD=$(openssl rand -hex 24)/" .env
-sed -i "s/^IMAGEGEN_TOKEN=$/IMAGEGEN_TOKEN=$(openssl rand -hex 32)/" .env
-echo "DESK_SESSION_SECRET='$(openssl rand -base64 48 | tr -d '\n')'" >> .env
+sed -i "s/^IMAGEGEN_TOKEN=$/IMAGEGEN_TOKEN=$(openssl rand -hex 32)/" .env.worker
+echo "DESK_SESSION_SECRET='$(openssl rand -base64 48 | tr -d '\n')'" >> .env.desk
 ```
 
 Set the desk origin to your machine's tailnet name (Tailscale must have MagicDNS and HTTPS certificates enabled
@@ -124,7 +139,7 @@ in the admin console, under DNS):
 
 ```bash
 host="$(tailscale status --json | jq -r '.Self.DNSName' | sed 's/\.$//')"
-echo "DESK_ORIGIN=https://$host" >> .env
+echo "DESK_ORIGIN=https://$host" >> .env.desk
 ```
 
 Build the images, then make the desk password hash (asked twice, hidden, minimum 12 characters):
@@ -134,15 +149,16 @@ Build the images, then make the desk password hash (asked twice, hidden, minimum
 ./deploy/compose.sh run --rm --no-deps worker hash-password
 ```
 
-Paste the printed hash into `.env` IN SINGLE QUOTES, because it contains `$`:
+Paste the printed hash into `.env.desk` IN SINGLE QUOTES, because it contains `$`:
 
 ```
 DESK_PASSWORD_HASH='scrypt$131072$8$1$....$....'
 ```
 
-Rules for `.env` (also written at the top of `.env.example`): leave keys you do not use commented out (an empty
-`KEY=` is rejected at start-up and the error names the key), single-quote any value with `$` or JSON, never
-commit or share the file, and keep a copy in your password manager (backups do not contain it).
+Rules for the env files (also written at the top of `.env.example`): keep each key in the file the table above
+names (`check-env.sh` names any misplaced key, never its value), leave keys you do not use commented out (an empty
+`KEY=` is rejected at start-up and the error names the key), single-quote any value with `$` or JSON, never commit
+or share the files, and keep a copy in your password manager (backups do not contain them).
 
 ## 5. Start the stack (mock mode)
 
@@ -158,6 +174,10 @@ Expected: `postgres`, `ollama`, `worker` and `desk` healthy; `imagegen` running 
 passes); `init-volumes` and `migrate` exited with code 0.
 
 ## 6. Download the models
+
+Ollama and the sidecar have no internet access. Each download runs in a one-shot setup service (profile
+`setup`), the only containers on the `egress` network besides worker and desk; it writes into the same model
+volume and exits.
 
 ### Ollama: gemma4:12b (about 8 GB)
 
@@ -176,27 +196,22 @@ Quick GPU test, then free the VRAM again:
 
 ### Hugging Face: FLUX.2 [klein] 4B, BiRefNet, Real-ESRGAN x4plus
 
-The sidecar downloads its weights into the `hf-models` volume (`/models`) on first use. Download them ahead
-of time so the first design job does not wait. `docs/MODELS.md` lists the exact repository ids, pinned
-revisions, licences and sizes. The sidecar's own downloader fetches exactly the pinned revisions it loads
-(FLUX.2 klein 4B and BiRefNet from Hugging Face, Real-ESRGAN x4plus from its GitHub release, SHA-256 checked),
-so offline mode works afterwards; do not use a bare `snapshot_download`, which fetches `main` plus files the
-sidecar never loads:
+The sidecar is offline (`IMAGEGEN_HF_OFFLINE=1` by default) and never downloads anything itself: download its
+weights into the `hf-models` volume (`/models`) before the first design job. `docs/MODELS.md` lists the exact
+repository ids, pinned revisions, licences and sizes. The sidecar's own downloader fetches exactly the pinned
+revisions it loads (FLUX.2 klein 4B and BiRefNet from Hugging Face, Real-ESRGAN x4plus from its GitHub release,
+SHA-256 checked); do not use a bare `snapshot_download`, which fetches `main` plus files the sidecar never loads:
 
 ```bash
-./deploy/compose.sh exec imagegen python -m imagegen.download          # ~15.5 GB into the hf-models volume
-./deploy/compose.sh exec imagegen python -m imagegen.download --check  # verify the files, no network
+./deploy/compose.sh build imagegen                                       # the download service reuses this image
+./deploy/compose.sh --profile setup run --rm imagegen-download           # ~15.5 GB into the hf-models volume
+./deploy/compose.sh --profile setup run --rm imagegen-download python -m imagegen.download --check   # verify
+./deploy/compose.sh up -d imagegen
 ```
 
 If a repository says you must accept its terms, accept them on huggingface.co with your account, create a
-read-only token, put `HF_TOKEN=...` in `.env` and run `./deploy/compose.sh up -d imagegen` before retrying.
-
-When every model is downloaded, stop all calls to huggingface.co:
-
-```bash
-echo "IMAGEGEN_HF_OFFLINE=1" >> .env
-./deploy/compose.sh up -d imagegen
-```
+read-only token and put it in `.env.imagegen` (`cp .env.imagegen.example .env.imagegen && chmod 600 .env.imagegen`,
+then `HF_TOKEN=...`) before retrying. Only the one-shot download reads that file.
 
 ### Check the GPU stack
 
@@ -271,18 +286,21 @@ internet. To limit which tailnet devices can reach the server, add an ACL rule i
   refresh token on every refresh; the worker keeps the current one in the `blobs` volume (`.secrets/`, mode 600),
   so the value in `.env` is only the starting point. Check the Etsy Open API v3 documentation if a step differs.
 * **Printify** (free plan): connect the Etsy shop in Printify and set its Etsy publishing so products are
-  created as drafts (manual publishing). The pipeline relies on Printify creating a DRAFT that you approve in
-  the desk. Create a personal access token (`PRINTIFY_API_TOKEN`); the shop id (`PRINTIFY_SHOP_ID`) is the `id`
+  created as drafts (manual publishing). Your approval in the desk is what makes a listing active. The worker
+  checks this on every publish: it reads the new listing's state from Etsy, and a listing that is not a draft is
+  deactivated at once (when active), the product is blocked with the reason, and the error is logged and audited
+  (`etsy.listing.deactivate`). Nothing is sold without your approval, but fix the Printify setting before resuming. Create a personal access token (`PRINTIFY_API_TOKEN`); the shop id (`PRINTIFY_SHOP_ID`) is the `id`
   of the Etsy shop in `curl -s -H "Authorization: Bearer $TOKEN" https://api.printify.com/v1/shops.json`.
-* **Marker API** (USPTO trademark search): `MARKER_API_USERNAME`, `MARKER_API_PASSWORD`.
-* **Pinterest** (optional): `PINTEREST_ACCESS_TOKEN`. Without it that trend source returns nothing.
+* **Marker API** (USPTO trademark search): `MARKER_API_USERNAME`, `MARKER_API_PASSWORD` (in `.env.worker`).
+* **Pinterest** (optional): `PINTEREST_ACCESS_TOKEN` (in `.env.worker`). Without it that trend source returns nothing.
 * **Etsy shop settings**: declare Printify as a production partner, and keep the shop's AI-assisted design
   disclosure consistent with the text the Listing Writer appends to every description.
 
 ### Switch to live, paused
 
 ```bash
-nano .env                     # MODE=live and the keys above
+nano .env                     # MODE=live, Etsy and Printify keys
+nano .env.worker              # Marker (and optional Pinterest / cloud keys)
 ./deploy/compose.sh up -d postgres
 ./deploy/compose.sh run --rm migrate
 ./deploy/compose.sh exec postgres psql -U etsy -d etsy -c "UPDATE settings SET paused = true, updated_at = now()"
@@ -304,18 +322,22 @@ such write is in the audit log. Then open the desk, review Settings (caps, block
 ### Going-live checklist
 
 - [ ] `docker run --rm --gpus all ubuntu:24.04 nvidia-smi` shows the RTX 3060
-- [ ] `check-gpu` says `GPU stack: READY`; `IMAGEGEN_HF_OFFLINE=1` after the weights are in place
+- [ ] `check-gpu` says `GPU stack: READY`; `imagegen-download ... --check` passes (the sidecar stays offline)
 - [ ] `demo` exits 0
 - [ ] Mock data wiped (fresh `pgdata` and `blobs` volumes) before `MODE=live`
-- [ ] `.env` is mode 600, the password hash is single-quoted, `DESK_ORIGIN` is exactly the URL you open
+- [ ] `./deploy/check-env.sh` prints nothing (env files mode 600, every secret in its own file), the password hash
+      is single-quoted, `DESK_ORIGIN` is exactly the URL you open
 - [ ] Desk: sign-in works over `https://…ts.net`, wrong passwords get rate limited, sign-out works
 - [ ] Only `127.0.0.1:3000` is published: `sudo ss -tlnp` shows no Docker port on `0.0.0.0` or `[::]`
-- [ ] Printify's Etsy connection creates drafts; the first draft checked on Etsy before approving anything
+- [ ] Printify's Etsy connection creates drafts; the first draft checked on Etsy before approving anything (a
+      non-draft listing is deactivated and its product blocked automatically, but fix the setting first)
 - [ ] `setup-catalog` pinned tshirt, mug and poster with plausible costs; `EUR_TO_USD` is current
 - [ ] Settings: 5 drafts/day, $10/day cloud spend, blocklist reviewed (brands, characters, celebrities, teams)
-- [ ] All agents local (`LLM_ROUTES` unset), or `LLM_PRICES_JSON` covers every cloud model id
+- [ ] All agents local (`LLM_ROUTES` unset), or `LLM_PRICES_JSON` covers every cloud model id (live mode refuses
+      to start otherwise)
 - [ ] Backup cron installed, one backup made, `restore.sh` tried on a scratch machine if possible
-- [ ] `OLLAMA_VERSION` pinned to the version that worked
+- [ ] Images pinned: `OLLAMA_IMAGE` unset (the tested default in `deploy/docker-compose.yml`) or set to a
+      `ollama/ollama:<version>@sha256:<digest>` you tested
 
 ## 10. Daily operations
 
@@ -373,13 +395,14 @@ the last rotation, get a new one (section 9).
 | Secret | How | Then |
 | --- | --- | --- |
 | `POSTGRES_PASSWORD` | `./deploy/compose.sh exec postgres psql -U etsy -d etsy`, then `\password etsy` (hex value), then put the same value in `.env`. Changing `.env` alone does nothing: Postgres reads it only on the first start. | `./deploy/compose.sh up -d` |
-| `IMAGEGEN_TOKEN` | `openssl rand -hex 32` into `.env` | `./deploy/compose.sh up -d imagegen worker desk` |
-| `DESK_SESSION_SECRET` | `openssl rand -base64 48` into `.env` (single quotes). Signs every session out. | `./deploy/compose.sh up -d desk` |
-| `DESK_PASSWORD_HASH` | `./deploy/compose.sh run --rm --no-deps worker hash-password`, paste in single quotes | `./deploy/compose.sh up -d desk` |
+| `IMAGEGEN_TOKEN` | `openssl rand -hex 32` into `.env.worker` | `./deploy/compose.sh up -d imagegen worker` |
+| `DESK_SESSION_SECRET` | `openssl rand -base64 48` into `.env.desk` (single quotes). Signs every session out. | `./deploy/compose.sh up -d desk` |
+| `DESK_PASSWORD_HASH` | `./deploy/compose.sh run --rm --no-deps worker hash-password`, paste into `.env.desk` in single quotes | `./deploy/compose.sh up -d desk` |
 | `ETSY_REFRESH_TOKEN` | New token with the PKCE flow (section 9). The stored rotated token belongs to the old value and is ignored automatically. To cut off the old grant, also revoke the app's access in your Etsy account. | `./deploy/compose.sh up -d worker desk` |
 | `ETSY_API_KEY` / `ETSY_SHARED_SECRET` | Etsy developer portal; a new keystring also needs a new refresh token | `up -d worker desk` |
 | `PRINTIFY_API_TOKEN` | Create a new token in Printify, put it in `.env`, then delete the old one | `up -d worker desk` |
-| `MARKER_API_*`, `PINTEREST_ACCESS_TOKEN`, `ANTHROPIC_API_KEY`, `RECRAFT_API_KEY`, `HF_TOKEN` | Issue the new value at the provider, update `.env`, revoke the old one | `up -d worker desk` (`imagegen` for `HF_TOKEN`) |
+| `MARKER_API_*`, `PINTEREST_ACCESS_TOKEN`, `ANTHROPIC_API_KEY`, `RECRAFT_API_KEY` | Issue the new value at the provider, update `.env.worker`, revoke the old one | `up -d worker` |
+| `HF_TOKEN` | New read-only token on huggingface.co into `.env.imagegen`, revoke the old one | nothing (read only by `imagegen-download`) |
 
 After any change: `./deploy/compose.sh run --rm --no-deps worker check-gpu` and `... worker status`.
 
@@ -404,7 +427,7 @@ nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv
 | `CUDA out of memory` in `imagegen` logs | Something else holds VRAM. `./deploy/compose.sh exec ollama ollama stop gemma4:12b`; check `nvidia-smi` for host processes (desktop session, browser, another container) and stop them. Then retry the job (`retry-failed --kind design`). |
 | `ollama ps` shows a CPU share (for example `40%/60% CPU/GPU`), LLM jobs very slow | The model did not fit. Free VRAM as above; lower `OLLAMA_NUM_CTX` to `8192` in `.env` and `./deploy/compose.sh up -d worker`; optionally add `OLLAMA_KV_CACHE_TYPE: q8_0` to the `ollama` environment in `deploy/docker-compose.yml` (needs flash attention, already on) and `./deploy/compose.sh up -d ollama`. |
 | Both GPU services stuck after a crash | `./deploy/compose.sh restart imagegen ollama`, then `check-gpu`. |
-| First design job slow or 503 from the sidecar | It loads (or downloads) the weights on first use. Download them in advance (section 6). |
+| First design job slow, or 503 `model_unavailable` from the sidecar | It loads the weights on first use (slow); 503 means they are not in the `hf-models` volume. Run the `imagegen-download` setup service (section 6). |
 | `could not select device driver "nvidia"` when starting | NVIDIA Container Toolkit not registered (section 3). |
 | GPU visible on the host but not in a container | `docker run --rm --gpus all ubuntu:24.04 nvidia-smi`; after a driver upgrade, reboot the host. |
 
@@ -412,9 +435,11 @@ nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv
 
 | Symptom | Cause and fix |
 | --- | --- |
-| `compose.sh: .env is readable by group/others` | `chmod 600 .env` |
-| `required variable POSTGRES_PASSWORD is missing a value` | Fill `POSTGRES_PASSWORD` and `IMAGEGEN_TOKEN` in `.env` (section 4). |
-| `Invalid environment: <KEY>: ...` in worker or desk logs | That key is empty or malformed in `.env`. Comment out unused keys; single-quote JSON and the password hash. |
+| `check-env: ... is readable by group/others` | `chmod 600` on the file it names |
+| `check-env: <KEY> belongs in .env.worker` (or `.env.desk`, `.env.imagegen`) | Move that line to the named file (section 4), then rerun. |
+| `required variable POSTGRES_PASSWORD (or IMAGEGEN_TOKEN) is missing a value` | Fill `POSTGRES_PASSWORD` in `.env` and `IMAGEGEN_TOKEN` in `.env.worker` (section 4). |
+| `Invalid environment: <KEY>: ...` in worker or desk logs | That key is empty, malformed, or missing from the container's env file. Comment out unused keys; single-quote JSON and the password hash. |
+| Worker exits with `LLM_PRICES_JSON has no price for the cloud model(s) ...` | A route uses Anthropic in live mode without a price: add every `ANTHROPIC_MODEL_*` id to `LLM_PRICES_JSON` in `.env.worker`, or route the agents back to Ollama. |
 | `migrate` exits non-zero, `password authentication failed` | `.env` password differs from the one Postgres was created with. Use the original, or change it (section 12). |
 | Desk sign-in works but every change is refused | `DESK_ORIGIN` is not exactly the URL in the browser (scheme, host, no trailing slash). |
 | `worker` unhealthy | The process stopped writing its heartbeat: `./deploy/compose.sh logs --tail 200 worker`, then `./deploy/compose.sh restart worker`. |
@@ -434,8 +459,14 @@ git pull                                  # or copy the new release over the old
 ./deploy/compose.sh run --rm --no-deps worker status
 ```
 
-To update the models, change `OLLAMA_VERSION` (and pull again) or the sidecar's model ids (see
-`docs/MODELS.md`), one at a time, and run `check-gpu` plus one design job before resuming normal work.
+Third-party images are pinned by version and digest: Postgres and busybox in `deploy/docker-compose.yml`, Ollama
+there too (or `OLLAMA_IMAGE` in `.env`), Node in `deploy/Dockerfile.worker` and `apps/desk/Dockerfile.desk`, CUDA and
+uv in `apps/imagegen/Dockerfile`. Update one deliberately: read its release notes, look up the digest
+(`docker buildx imagetools inspect <image>:<version>`), change the reference to `<image>:<version>@sha256:<digest>`,
+`./deploy/compose.sh build` / `pull`, and test in a quiet moment (keep Postgres on the same major version).
+
+To update the models, change the Ollama tag (pull it with `ollama-pull`, section 6) or the sidecar's model pins
+(see `docs/MODELS.md`), one at a time, and run `check-gpu` plus one design job before resuming normal work.
 
 ## 16. Security checks (monthly)
 
@@ -443,7 +474,8 @@ To update the models, change `OLLAMA_VERSION` (and pull again) or the sidecar's 
 sudo ss -tlnp | grep -v '127.0.0' | grep -i docker          # must print nothing
 ./deploy/compose.sh ps --format '{{.Name}}\t{{.Ports}}'      # only the desk: 127.0.0.1:3000->3000/tcp
 ./deploy/compose.sh exec worker id                           # uid=1000(node)
-stat -c '%a %n' .env /srv/etsy-agents/backups                # 600 and 700
+./deploy/check-env.sh                                        # prints nothing: env files 600, secrets scoped
+stat -c '%a %n' .env* /srv/etsy-agents/backups               # 600 for the env files, 700 for the backups
 tailscale serve status                                       # serve only, no funnel
 ```
 

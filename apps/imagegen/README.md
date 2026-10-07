@@ -38,24 +38,29 @@ Behaviour:
 | --- | --- | --- |
 | `IMAGEGEN_TOKEN` / `IMAGEGEN_TOKEN_FILE` | – (required, ≥ 24 chars) | `openssl rand -hex 32` |
 | `HF_HOME` | `/models` | Hugging Face cache (the `hf-models` volume) |
-| `HF_HUB_OFFLINE` or `IMAGEGEN_OFFLINE` | `0` | `1` after `python -m imagegen.download`: no network at all |
+| `HF_HUB_OFFLINE` or `IMAGEGEN_OFFLINE` | `0` (compose: `1`) | `1` = never download; compose sets it from `IMAGEGEN_HF_OFFLINE` (default `1`) |
 | `IMAGEGEN_DEVICE` | `cuda` | `cuda`, `cuda:N` or `cpu` (CPU is for debugging only) |
 | `IMAGEGEN_FLUX_CPU_OFFLOAD` | `1` | keep on for 12 GB cards |
 | `IMAGEGEN_UPSCALE_TILE` / `_TILE_PAD` | `512` / `16` | tiles halve automatically on CUDA OOM (min 128) |
 | `IMAGEGEN_QUEUE_TIMEOUT_S` | `240` | |
-| `IMAGEGEN_FLUX_REPO`, `_FLUX_REVISION`, `_BIREFNET_REPO`, `_BIREFNET_REVISION`, `_ESRGAN_URL`, `_ESRGAN_SHA256`, `_ESRGAN_PATH` | pinned in `src/imagegen/config.py` | see docs/MODELS.md "How to swap" |
+| `IMAGEGEN_FLUX_REPO`, `_FLUX_REVISION`, `_BIREFNET_REPO`, `_BIREFNET_REVISION`, `_ESRGAN_URL`, `_ESRGAN_SHA256`, `_ESRGAN_PATH` | pinned in `src/imagegen/config.py` | must match the allowlist there; see docs/MODELS.md "How to swap" |
+| `IMAGEGEN_ALLOW_UNREVIEWED_MODEL` | `0` | `1` lets a model outside the allowlist start (experiments only; logged at error level) |
 | `IMAGEGEN_LOG_LEVEL` | `INFO` | JSON lines on stdout; no prompts, tokens or image bytes |
 
-Non-commercial repositories (FLUX.1 [dev], FLUX.2 [dev], FLUX.2 [klein] 9B, ...) are refused at start-up.
+Only allowlisted (repository, revision) pairs start (licence checked for commercial use; BiRefNet's remote code
+reviewed at that commit). Non-commercial repositories (FLUX.1 [dev], FLUX.2 [dev], FLUX.2 [klein] 9B, ...) are
+refused even with `IMAGEGEN_ALLOW_UNREVIEWED_MODEL=1`.
 
 ## Weights
 
-```sh
-./deploy/compose.sh exec imagegen python -m imagegen.download          # ~15.5 GB into the hf-models volume
-./deploy/compose.sh exec imagegen python -m imagegen.download --check  # verify, no network
-```
+The running sidecar has no internet access (internal Docker network) and is offline by default. Download the
+weights once with the one-shot setup service, the only one with internet access (HF_TOKEN, if a repository needs
+one, comes from `.env.imagegen`):
 
-Then set `IMAGEGEN_HF_OFFLINE=1` in `.env`.
+```sh
+./deploy/compose.sh --profile setup run --rm imagegen-download                                        # ~15.5 GB
+./deploy/compose.sh --profile setup run --rm imagegen-download python -m imagegen.download --check   # verify only
+```
 
 ## Development
 

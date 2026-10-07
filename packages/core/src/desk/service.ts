@@ -327,12 +327,16 @@ export function createDeskService(deps: OrchestratorDeps): DeskService {
 
 let cached: Promise<DeskService> | null = null;
 
-/** Builds db + integrations + llm + agents from the environment and returns a ready DeskService (cached per process). */
+/**
+ * Builds the desk runtime (db, Etsy, Printify, storage, image tools; no model, Marker or imagegen clients) from the
+ * environment and returns a ready DeskService (cached per process). Load `env` with `loadEnv(source, { scope: 'desk' })`.
+ */
 export async function createDeskServiceFromEnv(env: Env): Promise<DeskService> {
   if (!cached) {
     cached = (async () => {
       const { buildRuntime } = await import('../orchestrator/runtime.ts');
-      const runtime = await buildRuntime(env, { component: 'desk' });
+      // Desk scope: no Marker, imagegen or model clients, so the desk container holds none of their keys.
+      const runtime = await buildRuntime(env, { component: 'desk', scope: 'desk' });
       return createDeskService(runtime.deps);
     })();
     cached.catch(() => {

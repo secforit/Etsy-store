@@ -84,4 +84,37 @@ describe('createIntegrations', () => {
     await i.gpu.withGpu('image', async () => undefined);
     expect(fetch.calls.filter((c) => c.url.includes('ollama'))).toHaveLength(0);
   });
+
+  it("desk scope builds without the worker's keys (Marker, imagegen) and refuses worker-only clients", async () => {
+    const fetch = stubFetch(() => new Response('unexpected', { status: 500 }));
+    const env = loadEnv(
+      {
+        MODE: 'live',
+        DATABASE_URL: 'postgres://u:p@postgres:5432/db',
+        STORAGE_DIR: dir,
+        ETSY_API_KEY: 'keystring',
+        ETSY_SHOP_ID: '5551234',
+        ETSY_REFRESH_TOKEN: '123.refresh',
+        PRINTIFY_API_TOKEN: 'pfy',
+        PRINTIFY_SHOP_ID: '987654',
+      },
+      { scope: 'desk' },
+    );
+    // The full bundle cannot be built from the desk's environment...
+    await expect(createIntegrations(env, { fetch, logger: noopLogger })).rejects.toThrow(/MARKER_API_USERNAME/);
+    // ...the desk bundle can, and only its own clients are real.
+    const i = await createIntegrations(env, { fetch, logger: noopLogger, scope: 'desk' });
+    expect(i.etsy).toBeInstanceOf(LiveEtsyClient);
+    expect(i.printify).toBeInstanceOf(LivePrintifyClient);
+    expect(i.storage).toBeInstanceOf(FileBlobStorage);
+    expect(i.upscaler).toBeNull();
+    expect(i.trendSources).toEqual([]);
+    expect(() => i.trademark.search('anything')).toThrow(/not available in the approval desk/);
+    expect(() => i.imageGen.generate({ prompt: 'p', style: 's', transparentBackground: true, widthPx: 512, heightPx: 512 })).toThrow(
+      /not available in the approval desk/,
+    );
+    expect(() => i.gpu.withGpu('llm', async () => 1)).toThrow(/not available in the approval desk/);
+    await expect(i.fetchImage('https://images.printify.com/x.png')).rejects.toThrow(/not available in the approval desk/);
+    expect(fetch.calls).toHaveLength(0);
+  });
 });

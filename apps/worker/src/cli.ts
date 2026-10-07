@@ -54,7 +54,8 @@ export async function main(argv: readonly string[], ctx: CliContext = { io: cons
   const getEnv = () => ctx.env ?? loadEnv(scopeEnvForLoad(ctx.rawEnv ?? process.env));
   switch (args.command) {
     case 'migrate': {
-      const env = getEnv();
+      // Only DATABASE_URL is needed: the one-shot migrate container gets no API keys (deploy/docker-compose.yml).
+      const env = ctx.env ?? loadEnv(scopeEnvForLoad(ctx.rawEnv ?? process.env), { scope: 'database' });
       const { db, engine } = await openDb(env);
       try {
         const ran = await migrate(db);

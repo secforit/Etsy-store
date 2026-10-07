@@ -29,7 +29,9 @@ function isProduction(): boolean {
 }
 
 function build(): DeskConfig {
-  const env = loadEnv(scopeEnvForLoad(process.env));
+  // Desk scope: live mode needs only the desk's own keys (DB, Etsy, Printify); the worker's secrets
+  // (Marker, imagegen token, cloud LLM) are never given to this container (deploy/docker-compose.yml).
+  const env = loadEnv(scopeEnvForLoad(process.env), { scope: 'desk' });
   const deskOrigin = normalizeOrigin(env.DESK_ORIGIN);
   let passwordHash: string | null = env.DESK_PASSWORD_HASH ?? null;
   if (passwordHash && !parsePasswordHash(passwordHash)) {

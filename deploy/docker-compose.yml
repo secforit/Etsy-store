@@ -9,15 +9,20 @@
 #
 # Networks:
 #   backend  internal (no route to the internet): every service talks to every other service here.
-#   egress   outbound internet for the services that need it at run time: worker + desk (Etsy, Printify,
-#            Marker APIs). Postgres, ollama and imagegen are NEVER on it. Model downloads run only in the
+#   egress   outbound internet for the services that need it at run time: worker (Etsy, Printify, Marker,
+#            optional cloud APIs) and desk (Etsy, Printify). Postgres, ollama and imagegen are NEVER on it. Model downloads run only in the
 #            one-shot setup services `ollama-pull` and `imagegen-download` (profile `setup`).
 #
-# Secrets are scoped per container (least privilege; deploy/compose.sh refuses misplaced keys):
-#   .env           shared: compose interpolation, migrate, worker, desk (DB, Etsy, Printify, Marker, imagegen token)
-#   .env.worker    worker only: cloud LLM keys and routing, Recraft, Pinterest
+# Secrets are scoped per container (least privilege). deploy/compose.sh runs deploy/check-env.sh first, which
+# refuses to start when a key sits in a file that other containers read (it prints key names, never values):
+#   .env           shared (migrate, worker, desk) + compose settings: MODE, database, Etsy, Printify, limits
+#   .env.worker    worker only: imagegen token, Marker, LLM routing and cloud keys, Recraft, Pinterest.
+#                  Also a compose interpolation source, so `imagegen` gets IMAGEGEN_TOKEN from it.
 #   .env.desk      desk only: DESK_PASSWORD_HASH, DESK_SESSION_SECRET, DESK_ORIGIN
-#   .env.imagegen  imagegen-download only: HF_TOKEN
+#   .env.imagegen  imagegen-download only (optional): HF_TOKEN
+# The desk loads its environment with the 'desk' scope (packages/core/src/config/env.ts) and builds a runtime
+# without the Marker, imagegen and model clients, so it runs without any worker secret. `migrate` only needs
+# the database URL.
 #
 # GPU: only `ollama` and `imagegen` reserve the GPU. They never hold VRAM at the same time: the worker's
 # GpuCoordinator unloads one before using the other, and Ollama keeps at most one model loaded.
@@ -43,8 +48,8 @@ x-gpu: &gpu
             capabilities: [gpu]
 
 # Ollama release used by `ollama` and `ollama-pull`. Override with OLLAMA_IMAGE in .env only to a pinned
-# `ollama/ollama:<version>@sha256:<digest>` you have tested.
-x-ollama-image: &ollama-image ${OLLAMA_IMAGE:-ollama/ollama:OLLAMA_PIN}
+# `ollama/ollama:<version>@sha256:<digest>` you have tested (check-env.sh refuses an override without a digest).
+x-ollama-image: &ollama-image ${OLLAMA_IMAGE:-ollama/ollama:0.35.1@sha256:292ee7945dfc3d5840a181f3ab86fedb1e66703e02c8af98b50f4da56b7e278c}
 
 x-app-env: &app-env
   # Values here override .env. The password is interpolated from .env (POSTGRES_PASSWORD, hex only).
@@ -61,7 +66,7 @@ x-worker-build: &worker-build
 services:
   # One-shot: hands the shared volumes to uid 1000 (the app user) on first start. No network, minimal caps.
   init-volumes:
-    image: BUSYBOX_PIN
+    image: busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
     command: ["sh", "-c", "chown 1000:1000 /data/blobs /ollama && chmod 750 /data/blobs"]
     user: "0:0"
     network_mode: none
@@ -76,7 +81,7 @@ services:
     logging: *logging
 
   postgres:
-    image: POSTGRES_PIN
+    image: postgres:16.15-alpine3.24@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
     # uid 70 = the image's postgres user: runs without root and without any capability.
     user: "70:70"
     restart: unless-stopped
@@ -189,7 +194,7 @@ services:
     image: etsy-agents/imagegen:local
     restart: unless-stopped
     environment:
-      IMAGEGEN_TOKEN: ${IMAGEGEN_TOKEN:?set IMAGEGEN_TOKEN in .env (openssl rand -hex 32)}
+      IMAGEGEN_TOKEN: ${IMAGEGEN_TOKEN:?set IMAGEGEN_TOKEN in .env.worker (openssl rand -hex 32)}
       HF_HOME: /models
       # Offline by default: the weights come from the one-shot `imagegen-download` (profile `setup`), and this
       # service has no internet access anyway (internal network only).
@@ -223,7 +228,7 @@ services:
     profiles: [setup]
     command: ["python", "-m", "imagegen.download"]
     environment:
-      IMAGEGEN_TOKEN: ${IMAGEGEN_TOKEN:?set IMAGEGEN_TOKEN in .env (openssl rand -hex 32)}
+      IMAGEGEN_TOKEN: ${IMAGEGEN_TOKEN:?set IMAGEGEN_TOKEN in .env.worker (openssl rand -hex 32)}
       HF_HOME: /models
       HF_HUB_OFFLINE: "0"
     env_file:
@@ -242,7 +247,8 @@ services:
     restart: "no"
     logging: *logging
 
-  # One-shot: applies SQL migrations before the worker and the desk start.
+  # One-shot: applies SQL migrations before the worker and the desk start. Only the shared .env (it needs just
+  # DATABASE_URL, which compose builds below): no API key reaches it.
   migrate:
     build: *worker-build
     image: etsy-agents/worker:local
@@ -282,9 +288,9 @@ services:
     env_file:
       - path: ../.env
         required: true
-      # Worker-only keys (cloud LLM, Recraft, Pinterest): never in the desk.
+      # Worker-only keys (imagegen token, Marker, cloud LLM, Recraft, Pinterest): never in the desk.
       - path: ../.env.worker
-        required: false
+        required: true
     environment:
       <<: *app-env
     volumes:
@@ -318,7 +324,8 @@ services:
     env_file:
       - path: ../.env
         required: true
-      # Desk-only secrets: no other container gets the password hash or the session-signing key.
+      # Desk-only secrets: no other container gets the password hash or the session-signing key. The desk gets no
+      # worker secret at all (no .env.worker).
       - path: ../.env.desk
         required: false
     environment:

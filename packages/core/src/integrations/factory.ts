@@ -4,6 +4,7 @@
  * MODE=live -> live clients: Etsy (OAuth refresh), Printify, Marker, trend sources, filesystem storage,
  *              GPU coordinator (Ollama + imagegen sidecar on one RTX 3060), image generation from
  *              IMAGEGEN_PROVIDER (local sidecar by default, Recraft optional), sidecar upscaler when configured.
+ *              With `scope: 'desk'` only Etsy, Printify, storage and image tools (the desk holds no other keys).
  * Secrets are read from `env` only and never logged.
  */
 import path from 'node:path';
@@ -22,7 +23,7 @@ import { RecraftImageGenClient } from './recraft.ts';
 import { FileBlobStorage } from './storage.ts';
 import { LiveTrademarkClient } from './trademark.ts';
 import { EtsySearchTrendSource, PinterestTrendSource, SeasonalTrendSource } from './trends.ts';
-import type { BlobStorage, ImageGenClient, Integrations } from './types.ts';
+import type { BlobStorage, GpuCoordinator, ImageGenClient, Integrations, TrademarkClient } from './types.ts';
 
 export interface CreateIntegrationsOptions {
   logger?: Logger;
@@ -36,6 +37,22 @@ export interface CreateIntegrationsOptions {
   onExternalWrite?: ExternalWriteHook;
   /** Override blob storage (tests). */
   storage?: BlobStorage;
+  /**
+   * 'desk' (live mode): only the clients the approval desk uses (Etsy, Printify, storage, image tools). Marker,
+   * image generation, the GPU stack, trend sources and the mockup fetcher are stubs that throw, so the desk
+   * container needs none of their keys (see config/env.ts EnvScope). Default 'all'.
+   */
+  scope?: 'all' | 'desk';
+}
+
+/** Stand-in for a client the desk must never use: any call fails loudly instead of reaching a service. */
+function notInDesk<T extends object>(name: string): T {
+  const fail = () => {
+    throw new Error(`${name} is not available in the approval desk`);
+  };
+  return new Proxy({} as T, {
+    get: (_target, prop) => (prop === 'then' ? undefined : fail),
+  });
 }
 
 function defaultLogger(env: Env): Logger {
@@ -95,6 +112,23 @@ export async function createIntegrations(env: Env, opts: CreateIntegrationsOptio
     ...(opts.printifyCatalog ? { catalog: opts.printifyCatalog } : {}),
     ...(opts.onExternalWrite ? { onExternalWrite: opts.onExternalWrite } : {}),
   });
+
+  if (opts.scope === 'desk') {
+    return {
+      etsy,
+      printify,
+      trademark: notInDesk<TrademarkClient>('the trademark search'),
+      imageGen: notInDesk<ImageGenClient>('image generation'),
+      trendSources: [],
+      storage: opts.storage ?? new FileBlobStorage(env.STORAGE_DIR),
+      imageTools: new SharpImageTools(),
+      gpu: notInDesk<GpuCoordinator>('the GPU coordinator'),
+      upscaler: null,
+      fetchImage: async () => {
+        throw new Error('the mockup image fetcher is not available in the approval desk');
+      },
+    };
+  }
 
   const trademark = new LiveTrademarkClient({
     username: required(env.MARKER_API_USERNAME, 'MARKER_API_USERNAME'),

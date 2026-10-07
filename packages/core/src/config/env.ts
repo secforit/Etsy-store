@@ -8,7 +8,7 @@ import { z } from 'zod';
 
 const nonEmpty = z.string().trim().min(1);
 
-const EnvSchema = z
+const EnvObjectSchema = z
   .object({
     MODE: z.enum(['mock', 'live']).default('mock'),
     LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
@@ -77,28 +77,45 @@ const EnvSchema = z
     DESK_SESSION_SECRET: z.string().min(32).optional(),
     /** The desk's public origin, e.g. https://secforit-home.<tailnet>.ts.net (served over Tailscale). */
     DESK_ORIGIN: z.url().optional(),
-  })
-  .superRefine((env, ctx) => {
+  });
+
+/**
+ * Which process loads the environment (least privilege, see deploy/docker-compose.yml):
+ *  - 'all' (default): the worker and its CLI; live mode needs every key the pipeline uses.
+ *  - 'desk': the approval desk, which only reads the database and blobs and calls Etsy (approve) and Printify
+ *    (catalog). Its container never receives the Marker, imagegen or cloud-LLM keys, so live mode does not ask
+ *    for them (orchestrator/runtime.ts builds a desk runtime without those clients).
+ *  - 'database': `migrate` only needs DATABASE_URL.
+ */
+export type EnvScope = 'all' | 'desk' | 'database';
+
+type EnvShape = z.infer<typeof EnvObjectSchema>;
+
+/** Keys that must be set when MODE=live, for the given scope. */
+export function requiredLiveKeys(env: EnvShape, scope: EnvScope = 'all'): (keyof EnvShape)[] {
+  const required: (keyof EnvShape)[] = ['DATABASE_URL'];
+  if (scope === 'database') return required;
+  required.push('ETSY_API_KEY', 'ETSY_SHOP_ID', 'ETSY_REFRESH_TOKEN', 'PRINTIFY_API_TOKEN', 'PRINTIFY_SHOP_ID');
+  if (scope === 'desk') return required;
+  required.push('MARKER_API_USERNAME', 'MARKER_API_PASSWORD');
+  const usesAnthropic =
+    env.LLM_DEFAULT_PROVIDER === 'anthropic' || Object.values(env.LLM_ROUTES).includes('anthropic');
+  if (usesAnthropic) required.push('ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL_LARGE', 'ANTHROPIC_MODEL_SMALL');
+  if (env.IMAGEGEN_PROVIDER === 'recraft') required.push('RECRAFT_API_KEY');
+  if (env.IMAGEGEN_PROVIDER === 'local') required.push('IMAGEGEN_TOKEN');
+  return required;
+}
+
+function envSchemaFor(scope: EnvScope) {
+  return EnvObjectSchema.superRefine((env, ctx) => {
     if (env.MODE !== 'live') return;
-    const required: (keyof typeof env)[] = [
-      'DATABASE_URL',
-      'ETSY_API_KEY',
-      'ETSY_SHOP_ID',
-      'ETSY_REFRESH_TOKEN',
-      'PRINTIFY_API_TOKEN',
-      'PRINTIFY_SHOP_ID',
-      'MARKER_API_USERNAME',
-      'MARKER_API_PASSWORD',
-    ];
-    const usesAnthropic =
-      env.LLM_DEFAULT_PROVIDER === 'anthropic' || Object.values(env.LLM_ROUTES).includes('anthropic');
-    if (usesAnthropic) required.push('ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL_LARGE', 'ANTHROPIC_MODEL_SMALL');
-    if (env.IMAGEGEN_PROVIDER === 'recraft') required.push('RECRAFT_API_KEY');
-    if (env.IMAGEGEN_PROVIDER === 'local') required.push('IMAGEGEN_TOKEN');
-    for (const key of required) {
+    for (const key of requiredLiveKeys(env, scope)) {
       if (!env[key]) ctx.addIssue({ code: 'custom', path: [key], message: `${key} is required when MODE=live` });
     }
   });
+}
+
+const EnvSchema = envSchemaFor('all');
 
 export type Env = z.infer<typeof EnvSchema>;
 
@@ -114,8 +131,9 @@ function resolveFileVars(source: NodeJS.ProcessEnv): Record<string, string | und
   return out;
 }
 
-export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
-  const parsed = EnvSchema.safeParse(resolveFileVars(source));
+export function loadEnv(source: NodeJS.ProcessEnv = process.env, opts: { scope?: EnvScope } = {}): Env {
+  const schema = opts.scope && opts.scope !== 'all' ? envSchemaFor(opts.scope) : EnvSchema;
+  const parsed = schema.safeParse(resolveFileVars(source));
   if (!parsed.success) {
     // Report key names only; never echo values.
     const problems = parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ');

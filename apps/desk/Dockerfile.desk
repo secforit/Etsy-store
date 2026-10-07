@@ -7,10 +7,12 @@
 #
 # Runtime: listens on 0.0.0.0:3000 INSIDE the container; compose publishes it on 127.0.0.1:3000 only and
 # Razvan reaches it through `tailscale serve` (HTTPS), so the Secure session cookie works.
-# Needs at runtime: the env from .env (loadEnv), DESK_PASSWORD_HASH, DESK_SESSION_SECRET, DESK_ORIGIN,
-# and the blob storage volume at STORAGE_DIR (writable by uid 1000).
+# Needs at runtime: the shared .env (MODE, database, Etsy, Printify; loaded with the 'desk' scope, so no worker
+# secret is needed), .env.desk (DESK_PASSWORD_HASH, DESK_SESSION_SECRET, DESK_ORIGIN), and the blob storage
+# volume at STORAGE_DIR (writable by uid 1000).
 
-ARG NODE_IMAGE=node:22-slim
+# Pinned by version AND digest (Debian bookworm slim); update deliberately (docs/RUNBOOK.md, "Updating").
+ARG NODE_IMAGE=node:22.23.3-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392
 
 # ---- deps: install the workspace from the lockfile --------------------------------------------------
 FROM ${NODE_IMAGE} AS deps

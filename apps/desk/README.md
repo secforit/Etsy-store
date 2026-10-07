@@ -18,20 +18,23 @@ database or external APIs directly.
 
 ## Environment
 
-Read at request time through `loadEnv` (never at build time):
+Read at request time through `loadEnv(..., { scope: 'desk' })` (never at build time). In Docker the desk gets the
+shared `.env` plus `.env.desk` and nothing else: no Marker, imagegen or cloud-LLM key reaches it, and its runtime
+builds only the database, Etsy, Printify, storage and image-tools clients (the others throw if called).
 
 - `DESK_PASSWORD_HASH`: `scrypt$N$r$p$saltB64$hashB64`, made with `./deploy/compose.sh run --rm --no-deps worker hash-password`
   (or `npx tsx apps/worker/src/cli.ts hash-password` from the repo root; not `npm run worker`, which starts the worker loop).
 - `DESK_SESSION_SECRET`: at least 32 random characters, e.g. `openssl rand -base64 48`. Rotating it signs everyone out.
 - `DESK_ORIGIN`: the exact HTTPS origin you open in the browser, e.g. `https://secforit-home.<tailnet>.ts.net`.
   Every POST (all server actions) must carry this `Origin`; without it, production refuses every change.
-- Everything else the core service needs (`MODE`, `DATABASE_URL`, `STORAGE_DIR`, Etsy keys, ...).
+- From the shared `.env`: `MODE`, `DATABASE_URL`, `STORAGE_DIR`, and in live mode the Etsy and Printify keys.
 
 ## Security
 
 - Session: `__Host-desk_session` cookie, HMAC-SHA256 over issued-at + random nonce, 12 h, `HttpOnly; Secure; SameSite=Strict`.
-  Sign out revokes every session issued until then (all devices) for the life of the process; rotating
-  `DESK_SESSION_SECRET` is the durable "sign out everywhere".
+  Sign out revokes every session issued until then (all devices) for the life of the process, but only for a
+  caller with a valid session (the action is reachable from the public `/login`; without a session it just clears
+  the caller's own cookie); rotating `DESK_SESSION_SECRET` is the durable "sign out everywhere".
 - `proxy.ts` (Next 16's middleware) runs on every request except `/_next/static`: origin check on mutations,
   session check on everything but `/login` and `/healthz`, per-request CSP nonce (`strict-dynamic`, no `unsafe-eval`).
   Pages, server actions and the asset route re-check the session themselves.

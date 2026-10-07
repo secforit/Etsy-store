@@ -102,21 +102,28 @@ sidecar keeps a ~0.3–0.5 GB CUDA context after `/unload`; that fits next to ge
 | BRIA RMBG-2.0 (`briaai/RMBG-2.0`) | CC BY-NC 4.0 unless you buy a commercial agreement |
 | 4x-UltraSharp (`Kim2091/UltraSharp`) and other community upscalers | many are CC BY-NC(-SA); check before swapping |
 
-The sidecar refuses to start if `IMAGEGEN_FLUX_REPO` or `IMAGEGEN_BIREFNET_REPO` names one of the black-forest-labs
-non-commercial repositories above (`NON_COMMERCIAL_REPOS` in `apps/imagegen/src/imagegen/config.py`).
+The sidecar runs only reviewed model pins: an allowlist of (repository, revision) pairs whose licence was checked
+for commercial use (`APPROVED_FLUX_MODELS`, `APPROVED_BIREFNET_MODELS` and `APPROVED_ESRGAN_SHA256` in
+`apps/imagegen/src/imagegen/config.py`). Any other repository, a mirror or re-upload under another namespace, another
+revision (which for BiRefNet would also mean unreviewed `trust_remote_code`), or other Real-ESRGAN weights is refused
+at start-up, and by `imagegen.download`. `IMAGEGEN_ALLOW_UNREVIEWED_MODEL=1` lifts that for experiments only and
+logs the model at error level. The black-forest-labs non-commercial repositories above (`NON_COMMERCIAL_REPOS`) are
+refused even then.
 
 ## Downloads and offline mode
 
 ```sh
-./deploy/compose.sh --profile setup run --rm ollama-pull                    # gemma4:12b, ~8 GB
-./deploy/compose.sh exec imagegen python -m imagegen.download           # FLUX + BiRefNet + Real-ESRGAN, ~15.5 GB
-./deploy/compose.sh exec imagegen python -m imagegen.download --check   # verify without network
+./deploy/compose.sh --profile setup run --rm ollama-pull                                  # gemma4:12b, ~8 GB
+./deploy/compose.sh --profile setup run --rm imagegen-download                            # FLUX + BiRefNet + Real-ESRGAN, ~15.5 GB
+./deploy/compose.sh --profile setup run --rm imagegen-download python -m imagegen.download --check   # verify, no download
 ```
 
+Ollama and the sidecar run on the internal Docker network only (no internet). Downloads happen only in these two
+one-shot setup services, which share the model volumes and are the only ones on the `egress` network.
 `imagegen.download` fetches exactly the pinned revisions the server loads (FLUX via `Flux2KleinPipeline.download`, so
-the duplicate single-file checkpoint at the repo root is skipped). Afterwards set `IMAGEGEN_HF_OFFLINE=1` in `.env`:
-the sidecar then never contacts huggingface.co or GitHub, and a missing file is reported as 503 `model_unavailable`
-instead of being downloaded.
+the duplicate single-file checkpoint at the repo root is skipped). The running sidecar is offline by default
+(`IMAGEGEN_HF_OFFLINE=1`): it never contacts huggingface.co or GitHub, and a missing file is reported as 503
+`model_unavailable` instead of being downloaded.
 
 ## Software versions
 
@@ -131,11 +138,15 @@ spandrel 0.4.2, timm 1.0.30, kornia 0.8.3, einops 0.8.2 (the last three are impo
 Always check the licence first (model and outputs, commercial use), then the VRAM budget (≤ 12 GB with Ollama
 unloaded), then run the pipeline in mock mode and on one real product before going live.
 
-- **LLM (per size class):** set `OLLAMA_MODEL_LARGE`, `OLLAMA_MODEL_SMALL`, `OLLAMA_MODEL_VISION` in `.env` and pull
-  the tag (`./deploy/compose.sh exec ollama ollama pull <tag>`). Keep the vision model able to read images. A different
+- **LLM (per size class):** set `OLLAMA_MODEL_LARGE`, `OLLAMA_MODEL_SMALL`, `OLLAMA_MODEL_VISION` in `.env.worker` and
+  pull the tag (`./deploy/compose.sh --profile setup run --rm -e PULL_MODEL=<tag> ollama-pull`). Keep the vision model able to read images. A different
   context size: `OLLAMA_NUM_CTX` (VRAM grows with it).
-- **Cloud LLM for some agents:** `LLM_ROUTES={"compliance_guard":"anthropic"}` plus `ANTHROPIC_API_KEY`,
-  `ANTHROPIC_MODEL_LARGE`, `ANTHROPIC_MODEL_SMALL` (counts against the $10/day cloud cap).
+- **Cloud LLM for some agents:** in `.env.worker`, `LLM_ROUTES={"compliance_guard":"anthropic"}` plus
+  `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL_LARGE`, `ANTHROPIC_MODEL_SMALL` and a price for each model id in
+  `LLM_PRICES_JSON` (counts against the $10/day cloud cap; live mode refuses to start without the prices).
+- **Any sidecar model (image generator, matting, upscaler):** check the licence, then add the new (repository,
+  revision) pair or weights hash to the allowlist in `apps/imagegen/src/imagegen/config.py` (a reviewed code change),
+  and set the variables below in the `imagegen` and `imagegen-download` services of `deploy/docker-compose.yml`.
 - **Image generator:** `IMAGEGEN_FLUX_REPO` + `IMAGEGEN_FLUX_REVISION` (a full commit sha). The code uses
   `Flux2KleinPipeline`, so only FLUX.2 klein-family checkpoints load (for example the undistilled
   `black-forest-labs/FLUX.2-klein-base-4B`, also Apache 2.0, which needs more steps: change `flux_steps` and
@@ -146,5 +157,5 @@ unloaded), then run the pipeline in mock mode and on one real product before goi
   for example a lite or HR checkpoint; review the remote code at that commit first).
 - **Upscaler:** `IMAGEGEN_ESRGAN_URL` (https) + `IMAGEGEN_ESRGAN_SHA256` (+ optionally `IMAGEGEN_ESRGAN_PATH`). Any
   3-channel x4 model that spandrel recognises works; the sidecar rejects other scales.
-- After any swap: `python -m imagegen.download`, restart the service, and run
-  `./deploy/compose.sh run --rm worker check-gpu`.
+- After any swap: `./deploy/compose.sh --profile setup run --rm imagegen-download`, restart the service
+  (`./deploy/compose.sh up -d imagegen`), and run `./deploy/compose.sh run --rm --no-deps worker check-gpu`.

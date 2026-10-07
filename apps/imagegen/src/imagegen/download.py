@@ -1,7 +1,9 @@
 """Pre-download every model into the /models volume (run once, with internet, before the first job):
 
-    ./deploy/compose.sh exec imagegen python -m imagegen.download          # download (about 15.5 GB)
-    ./deploy/compose.sh exec imagegen python -m imagegen.download --check  # verify only, no network
+    ./deploy/compose.sh --profile setup run --rm imagegen-download             # download (about 15.5 GB)
+    ./deploy/compose.sh --profile setup run --rm imagegen-download python -m imagegen.download --check
+
+The `imagegen-download` one-shot service is the only one with internet access; the running sidecar stays offline.
 
 Uses the same pinned repositories/revisions as the server, so afterwards IMAGEGEN_HF_OFFLINE=1 works. Loads nothing
 onto the GPU.
@@ -57,7 +59,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"config: {e}", file=sys.stderr)
         return 2
     if settings.offline and not args.check:
-        print("offline mode is on (HF_HUB_OFFLINE / IMAGEGEN_OFFLINE); run with IMAGEGEN_HF_OFFLINE=0", file=sys.stderr)
+        print(
+            "offline mode is on (HF_HUB_OFFLINE / IMAGEGEN_OFFLINE); download with the one-shot service:"
+            " ./deploy/compose.sh --profile setup run --rm imagegen-download",
+            file=sys.stderr,
+        )
         return 2
     failed = 0
     for name in args.only or list(STEPS):

@@ -10,7 +10,8 @@
 # root and read-only for the app user; the container runs as `node` (uid 1000) with a read-only root
 # filesystem, writing only to /tmp (tmpfs) and the blob volume (/data/blobs).
 
-ARG NODE_IMAGE=node:22-slim
+# Pinned by version AND digest (Debian bookworm slim); update deliberately (docs/RUNBOOK.md, "Updating").
+ARG NODE_IMAGE=node:22.23.3-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392
 
 # ---- deps: only the worker workspace (core + worker deps + root dev tools such as tsx), from the lockfile ----
 FROM ${NODE_IMAGE} AS deps

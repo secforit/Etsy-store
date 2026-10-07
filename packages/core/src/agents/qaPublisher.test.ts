@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { QaPublisherInput } from './contracts.ts';
+import type { QaPublisherDepsExt } from './extensions.ts';
 import { PrintifyProductPendingError, checkPrintFile, runQaPublisher, upscaleFactorFor } from './qaPublisher.ts';
 import { marginFor } from './pricing.ts';
 import {
@@ -18,6 +19,8 @@ import {
 import { LlmError } from '../llm/types.ts';
 
 const PID = '7f1c2a9e-0000-4000-8000-000000000002';
+/** Deps with the orchestrator's optional extensions (extensions.ts), typed so object literals may carry them. */
+const ext = (d: QaPublisherDepsExt): QaPublisherDepsExt => d;
 const EDITED = `designs/${PID}/edited-1.png`;
 
 const input = (over: Partial<QaPublisherInput> = {}): QaPublisherInput => ({
@@ -138,12 +141,15 @@ describe('QA & Publisher happy path', () => {
       events.push(`publish:${id}`);
       return origPublish(id);
     };
-    const { output } = await runQaPublisher(input(), {
-      ...s.deps,
-      onPrintifyProductCreated: async (id: string) => {
-        events.push(`created:${id}`);
-      },
-    });
+    const { output } = await runQaPublisher(
+      input(),
+      ext({
+        ...s.deps,
+        onPrintifyProductCreated: async (id: string) => {
+          events.push(`created:${id}`);
+        },
+      }),
+    );
     expect(output.status).toBe('drafted');
     expect(events).toEqual(['created:pfy-1', 'publish:pfy-1']);
   });
@@ -152,18 +158,21 @@ describe('QA & Publisher happy path', () => {
     const s = await setup();
     s.printify.products.set('pfy-9', { id: 'pfy-9', title: 't', mockupUrls: [], external: { id: '555', handle: null }, isLocked: false });
     const created: string[] = [];
-    await runQaPublisher(input({ existingPrintifyProductId: 'pfy-9' }), { ...s.deps, onPrintifyProductCreated: async (id: string) => void created.push(id) });
+    await runQaPublisher(input({ existingPrintifyProductId: 'pfy-9' }), ext({ ...s.deps, onPrintifyProductCreated: async (id: string) => void created.push(id) }));
     expect(created).toEqual([]);
   });
 
   it('does not publish when persisting the new product id fails (pending error carries the id)', async () => {
     const s = await setup();
-    const err = await runQaPublisher(input(), {
-      ...s.deps,
-      onPrintifyProductCreated: async () => {
-        throw new Error('db down');
-      },
-    }).catch((e) => e);
+    const err = await runQaPublisher(
+      input(),
+      ext({
+        ...s.deps,
+        onPrintifyProductCreated: async () => {
+          throw new Error('db down');
+        },
+      }),
+    ).catch((e) => e);
     expect(err).toBeInstanceOf(PrintifyProductPendingError);
     expect(err.printifyProductId).toBe('pfy-1');
     expect(s.printify.publishes).toHaveLength(0);
@@ -186,7 +195,7 @@ describe('QA & Publisher vision check fails closed', () => {
   it('never publishes when Printify has no mockups yet; qa_failed on the final attempt', async () => {
     const s = await setup();
     s.printify.mockupUrls = [];
-    const { output } = await runQaPublisher(input(), { ...s.deps, finalAttempt: true });
+    const { output } = await runQaPublisher(input(), ext({ ...s.deps, finalAttempt: true }));
     expect(output.status).toBe('qa_failed');
     if (output.status !== 'qa_failed') return;
     expect(output.qaNotes[0]).toContain('mockup check could not run');

@@ -10,6 +10,7 @@ import { createPgDb, createPgliteDb, migrate, type Db } from '../db/db.ts';
 import { createIntegrations } from '../integrations/factory.ts';
 import type { BlobStorage } from '../integrations/types.ts';
 import { createLlm } from '../llm/factory.ts';
+import type { LlmClient } from '../llm/types.ts';
 import { externalWriteAuditHook } from './audit.ts';
 import { cloudAgentsFor } from './caps.ts';
 import { dbCatalogResolver } from './catalog.ts';
@@ -30,6 +31,12 @@ export interface RuntimeOptions {
   migrate?: boolean;
   /** Raw process environment for the non-contract worker settings. */
   rawEnv?: Record<string, string | undefined>;
+  /**
+   * 'desk': the approval desk's runtime (least privilege). Only db, Etsy, Printify, storage and image tools are
+   * real; the model client and the worker-only integrations throw if used, and no cloud-LLM key or price is
+   * needed (the desk never calls a model). Load its env with `loadEnv(source, { scope: 'desk' })`.
+   */
+  scope?: 'all' | 'desk';
 }
 
 export interface Runtime {
@@ -56,13 +63,21 @@ export function assertCloudModelsPriced(env: Env, raw: Record<string, string | u
   throw new Error(
     `LLM_PRICES_JSON has no price for the cloud model(s) ${unpriced.join(', ')}. Without it the daily cloud spend cap ` +
       'cannot count their calls, so the service will not start. Add every ANTHROPIC_MODEL_* id to LLM_PRICES_JSON ' +
-      '(see .env.example), or route those agents back to ollama.',
+      'in .env.worker (see .env.worker.example), or route those agents back to ollama.',
   );
 }
 
+/** The desk never calls a model; a call would mean a bug, so it fails instead of reaching Ollama or a cloud API. */
+const noModelInDesk: LlmClient = {
+  async generate() {
+    throw new Error('the approval desk does not call language models');
+  },
+};
+
 export async function buildRuntime(env: Env, opts: RuntimeOptions = {}): Promise<Runtime> {
+  const desk = opts.scope === 'desk';
   const settings = loadOrchestratorEnv(opts.rawEnv ?? process.env);
-  assertCloudModelsPriced(env, opts.rawEnv ?? process.env);
+  if (!desk) assertCloudModelsPriced(env, opts.rawEnv ?? process.env);
   const logger = opts.logger ?? createLogger(env.LOG_LEVEL, opts.component ?? 'worker');
   const now = opts.now ?? (() => new Date());
   let db = opts.db;
@@ -81,8 +96,9 @@ export async function buildRuntime(env: Env, opts: RuntimeOptions = {}): Promise
     printifyCatalog: dbCatalogResolver(db),
     onExternalWrite: externalWriteAuditHook(db, now, logger),
     ...(opts.storage ? { storage: opts.storage } : {}),
+    ...(desk ? { scope: 'desk' as const } : {}),
   });
-  const llm = createLlm(env, { gpu: integrations.gpu, logger });
+  const llm: LlmClient = desk ? noModelInDesk : createLlm(env, { gpu: integrations.gpu, logger });
   const agents = createAgentRegistry();
 
   const deps: OrchestratorDeps = {
