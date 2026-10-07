@@ -4,7 +4,7 @@ import type { TrademarkHit } from '../../domain/types.ts';
 import { PRINTIFY_IMAGE_HOSTS } from '../fetchImage.ts';
 import { assertAllowlistedUrl } from '../http.ts';
 import { normaliseSidecarSide } from '../imagegen.ts';
-import { normaliseTrademarkTerm } from '../trademark.ts';
+import { normaliseTrademarkTerm, type TrademarkSearchOptions } from '../trademark.ts';
 import type {
   AllowlistedImageFetcher,
   GeneratedImage,
@@ -39,23 +39,24 @@ export const MOCK_TRADEMARKS: readonly TrademarkHit[] = [
   { mark: 'SPOOKY SEASON', serial: '88000015', status: 'dead', classes: [25], owner: null },
 ];
 
-function containsPhrase(haystack: string, needle: string): boolean {
-  return ` ${haystack} `.includes(` ${needle} `);
-}
-
-/** Matches like the live client: exact, trailing wildcard (`term*`), and marks contained in the term. */
+/**
+ * Matches exactly like Marker (and so the live client): the exact term, plus marks that START with the term
+ * (`term*`) unless `{prefix: false}`. A mark inside a longer term is NOT returned, as on the real API, so mock
+ * runs exercise the compliance guard's sub-phrase searches instead of hiding their absence.
+ */
 export class MockTrademarkClient implements TrademarkClient {
   readonly searches: string[] = [];
   constructor(private readonly marks: readonly TrademarkHit[] = MOCK_TRADEMARKS) {}
 
-  async search(term: string): Promise<TrademarkHit[]> {
+  async search(term: string, opts: TrademarkSearchOptions = {}): Promise<TrademarkHit[]> {
     const t = normaliseTrademarkTerm(term);
     this.searches.push(t);
     if (t.length < 2) return [];
+    const prefix = opts.prefix !== false;
     return this.marks
       .filter((m) => {
         const mark = normaliseTrademarkTerm(m.mark);
-        return mark === t || mark.startsWith(t) || containsPhrase(t, mark);
+        return mark === t || (prefix && mark.startsWith(t));
       })
       .map((m) => ({ ...m, classes: [...m.classes] }));
   }

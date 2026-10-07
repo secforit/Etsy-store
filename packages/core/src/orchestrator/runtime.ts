@@ -13,7 +13,7 @@ import { createLlm } from '../llm/factory.ts';
 import { externalWriteAuditHook } from './audit.ts';
 import { cloudAgentsFor } from './caps.ts';
 import { dbCatalogResolver } from './catalog.ts';
-import { loadOrchestratorEnv, type OrchestratorEnv } from './config.ts';
+import { cloudModelsWithoutPrice, loadOrchestratorEnv, type OrchestratorEnv } from './config.ts';
 import type { Logger, OrchestratorDeps } from './contracts.ts';
 import { createLogger } from './logger.ts';
 import type { OrchestratorOptions } from './orchestrator.ts';
@@ -46,8 +46,23 @@ export async function openDb(env: Env): Promise<{ db: Db; engine: 'postgres' | '
   return { db: await createPgliteDb(env.PGLITE_DIR), engine: 'pglite' };
 }
 
+/**
+ * Live mode refuses to start when a configured cloud model has no price in LLM_PRICES_JSON: its calls could not
+ * be counted correctly against the daily cloud spend cap. The error names the model ids, never any secret.
+ */
+export function assertCloudModelsPriced(env: Env, raw: Record<string, string | undefined>): void {
+  const unpriced = cloudModelsWithoutPrice(env, raw);
+  if (unpriced.length === 0) return;
+  throw new Error(
+    `LLM_PRICES_JSON has no price for the cloud model(s) ${unpriced.join(', ')}. Without it the daily cloud spend cap ` +
+      'cannot count their calls, so the service will not start. Add every ANTHROPIC_MODEL_* id to LLM_PRICES_JSON ' +
+      '(see .env.example), or route those agents back to ollama.',
+  );
+}
+
 export async function buildRuntime(env: Env, opts: RuntimeOptions = {}): Promise<Runtime> {
   const settings = loadOrchestratorEnv(opts.rawEnv ?? process.env);
+  assertCloudModelsPriced(env, opts.rawEnv ?? process.env);
   const logger = opts.logger ?? createLogger(env.LOG_LEVEL, opts.component ?? 'worker');
   const now = opts.now ?? (() => new Date());
   let db = opts.db;
@@ -87,6 +102,7 @@ export async function buildRuntime(env: Env, opts: RuntimeOptions = {}): Promise
     orchestratorOptions: {
       cloudAgents: cloudAgentsFor(env),
       reportIntervalMs: settings.ANALYST_REPORT_INTERVAL_HOURS * 3600_000,
+      imageGenCostUsd: env.MODE === 'live' && env.IMAGEGEN_PROVIDER === 'recraft' ? settings.RECRAFT_COST_PER_IMAGE_USD : 0,
     },
     async close() {
       if (ownsDb) await finalDb.close();

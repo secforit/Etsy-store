@@ -8,7 +8,7 @@ import { UploadForm } from '../../../../components/UploadForm.tsx';
 import { dateTime, eur, PRODUCT_TYPE_LABELS } from '../../../../lib/format.ts';
 import { getDeskService } from '../../../../lib/service.ts';
 import { requireSession } from '../../../../lib/session.ts';
-import { isUuid } from '../../../../lib/validate.ts';
+import { doneNotice, isUuid } from '../../../../lib/validate.ts';
 
 export const metadata: Metadata = { title: 'Product' };
 
@@ -62,9 +62,16 @@ function ComplianceTable({ checks }: { checks: ComplianceCheck[] }) {
   );
 }
 
-export default async function ProductPage({ params }: { params: Promise<{ id: string }> }) {
+export default async function ProductPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ id: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
   await requireSession();
   const { id } = await params;
+  const notice = doneNotice((await searchParams).done);
   if (!isUuid(id)) notFound();
   const svc = await getDeskService();
   const detail = await svc.getProduct(id);
@@ -89,6 +96,12 @@ export default async function ProductPage({ params }: { params: Promise<{ id: st
         <h1>{product.conceptTitle}</h1>
         <StateBadge state={product.state} />
       </div>
+
+      {notice ? (
+        <div className="banner banner-ok" role="status">
+          {notice}
+        </div>
+      ) : null}
 
       {product.blockReason ? (
         <div className="banner banner-bad" role="status">

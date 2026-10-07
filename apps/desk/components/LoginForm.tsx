@@ -11,6 +11,8 @@ export function LoginForm({ next }: { next: string }) {
   return (
     <form action={action} className="stack">
       <input type="hidden" name="next" value={next} />
+      {/* Single-user desk: a fixed username so password managers can file the entry; the server ignores it. */}
+      <input type="text" name="username" autoComplete="username" value="razvan" readOnly hidden />
       <div className="field">
         <label htmlFor="password">Password</label>
         <input

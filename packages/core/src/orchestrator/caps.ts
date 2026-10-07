@@ -62,12 +62,20 @@ export async function checkCaps(q: Queryable, now: Date, cloudAgents: readonly A
   };
 }
 
-/** Agents routed to a cloud provider for the given routing config (mirrors llm/router.ts selection). */
+/**
+ * Agents that spend cloud money for the given config: LLM routed to a cloud provider (mirrors llm/router.ts
+ * selection), plus the Designer when images come from the optional cloud fallback (IMAGEGEN_PROVIDER=recraft).
+ */
 export function cloudAgentsFor(env: {
   MODE: 'mock' | 'live';
   LLM_DEFAULT_PROVIDER: 'ollama' | 'anthropic';
   LLM_ROUTES: Record<string, 'ollama' | 'anthropic'>;
+  IMAGEGEN_PROVIDER?: 'local' | 'recraft';
 }): AgentName[] {
   if (env.MODE === 'mock') return [];
-  return AGENT_NAMES.filter((a) => (env.LLM_ROUTES[a] ?? env.LLM_DEFAULT_PROVIDER) === 'anthropic');
+  return AGENT_NAMES.filter(
+    (a) =>
+      (env.LLM_ROUTES[a] ?? env.LLM_DEFAULT_PROVIDER) === 'anthropic' ||
+      (a === 'designer' && env.IMAGEGEN_PROVIDER === 'recraft'),
+  );
 }

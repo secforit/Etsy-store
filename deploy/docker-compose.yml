@@ -1,0 +1,352 @@
+# Etsy agent team on secforit-home (Ubuntu 26.04, RTX 3060 12 GB). See docs/RUNBOOK.md.
+#
+# Always run through the wrapper (fixed project name, this file, the repository's .env):
+#   ./deploy/compose.sh up -d --build
+#
+# Exposure: NOTHING listens on 0.0.0.0. The desk is published on 127.0.0.1:3000 only and Razvan reaches it
+# over the tailnet with `tailscale serve --bg --https=443 http://127.0.0.1:3000`. Postgres, Ollama and the
+# imagegen sidecar have no published ports at all; they are reachable only on the internal `backend` network.
+#
+# Networks:
+#   backend  internal (no route to the internet): every service talks to every other service here.
+#   egress   outbound internet for the services that need it at run time: worker + desk (Etsy, Printify,
+#            Marker APIs). Postgres, ollama and imagegen are NEVER on it. Model downloads run only in the
+#            one-shot setup services `ollama-pull` and `imagegen-download` (profile `setup`).
+#
+# Secrets are scoped per container (least privilege; deploy/compose.sh refuses misplaced keys):
+#   .env           shared: compose interpolation, migrate, worker, desk (DB, Etsy, Printify, Marker, imagegen token)
+#   .env.worker    worker only: cloud LLM keys and routing, Recraft, Pinterest
+#   .env.desk      desk only: DESK_PASSWORD_HASH, DESK_SESSION_SECRET, DESK_ORIGIN
+#   .env.imagegen  imagegen-download only: HF_TOKEN
+#
+# GPU: only `ollama` and `imagegen` reserve the GPU. They never hold VRAM at the same time: the worker's
+# GpuCoordinator unloads one before using the other, and Ollama keeps at most one model loaded.
+#
+# Images: third-party images are pinned by version AND digest; update them deliberately (docs/RUNBOOK.md,
+# "Updating"). Memory and PID limits keep one runaway service (e.g. the sidecar) from taking the host down.
+
+name: etsy-agents
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+
+# Ollama release used by `ollama` and `ollama-pull`. Override with OLLAMA_IMAGE in .env only to a pinned
+# `ollama/ollama:<version>@sha256:<digest>` you have tested.
+x-ollama-image: &ollama-image ${OLLAMA_IMAGE:-ollama/ollama:OLLAMA_PIN}
+
+x-app-env: &app-env
+  # Values here override .env. The password is interpolated from .env (POSTGRES_PASSWORD, hex only).
+  DATABASE_URL: postgres://${POSTGRES_USER:-etsy}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-etsy}
+  STORAGE_DIR: /data/blobs
+  OLLAMA_BASE_URL: http://ollama:11434
+  IMAGEGEN_BASE_URL: http://imagegen:8000
+  WORKER_HEARTBEAT_PATH: /tmp/worker-heartbeat
+
+x-worker-build: &worker-build
+  context: ..
+  dockerfile: deploy/Dockerfile.worker
+
+services:
+  # One-shot: hands the shared volumes to uid 1000 (the app user) on first start. No network, minimal caps.
+  init-volumes:
+    image: BUSYBOX_PIN
+    command: ["sh", "-c", "chown 1000:1000 /data/blobs /ollama && chmod 750 /data/blobs"]
+    user: "0:0"
+    network_mode: none
+    volumes:
+      - blobs:/data/blobs
+      - ollama:/ollama
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER]
+    restart: "no"
+    logging: *logging
+
+  postgres:
+    image: POSTGRES_PIN
+    # uid 70 = the image's postgres user: runs without root and without any capability.
+    user: "70:70"
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-etsy}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-etsy}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [backend]
+    read_only: true
+    tmpfs:
+      - /var/run/postgresql
+      - /tmp
+    shm_size: 256mb
+    mem_limit: ${LIMIT_MEM_POSTGRES:-2g}
+    pids_limit: 512
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    stop_grace_period: 1m
+    logging: *logging
+
+  ollama:
+    image: *ollama-image
+    user: "1000:1000"
+    restart: unless-stopped
+    depends_on:
+      init-volumes:
+        condition: service_completed_successfully
+    environment:
+      HOME: /ollama
+      OLLAMA_MODELS: /ollama/models
+      OLLAMA_HOST: 0.0.0.0:11434
+      # One GPU, two owners: one model in VRAM, one request at a time.
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_NUM_PARALLEL: "1"
+      # Keep gemma4:12b warm between jobs; the GpuCoordinator unloads it (keep_alive 0) before image work.
+      OLLAMA_KEEP_ALIVE: 30m
+      OLLAMA_FLASH_ATTENTION: "1"
+    volumes:
+      - ollama:/ollama
+    # Internal network only: the API has no authentication and needs no internet after the one-shot pull.
+    networks: [backend]
+    read_only: true
+    tmpfs:
+      - /tmp
+    mem_limit: ${LIMIT_MEM_OLLAMA:-16g}
+    pids_limit: 1024
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    <<: *gpu
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    logging: *logging
+
+  # One-shot model download (about 8 GB):  ./deploy/compose.sh --profile setup run --rm ollama-pull
+  # The only time Ollama gets internet access: this container runs its OWN Ollama server on the `egress`
+  # network against the shared `ollama` volume, pulls the model and exits. The long-running `ollama` service
+  # stays on the internal network.
+  ollama-pull:
+    image: *ollama-image
+    profiles: [setup]
+    user: "1000:1000"
+    depends_on:
+      init-volumes:
+        condition: service_completed_successfully
+    environment:
+      HOME: /ollama
+      OLLAMA_MODELS: /ollama/models
+      OLLAMA_HOST: 127.0.0.1:11434
+      PULL_MODEL: ${OLLAMA_MODEL_LARGE:-gemma4:12b}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        ollama serve >/tmp/ollama-serve.log 2>&1 &
+        i=0
+        until ollama list >/dev/null 2>&1; do
+          i=$$((i + 1))
+          if [ "$$i" -gt 60 ]; then cat /tmp/ollama-serve.log; exit 1; fi
+          sleep 1
+        done
+        ollama pull "$$PULL_MODEL"
+    volumes:
+      - ollama:/ollama
+    networks: [egress]
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    healthcheck:
+      disable: true
+    restart: "no"
+    logging: *logging
+
+  # FLUX.2 [klein] 4B + BiRefNet + Real-ESRGAN sidecar (apps/imagegen). Bearer token required on every route.
+  imagegen:
+    build:
+      context: ../apps/imagegen
+    image: etsy-agents/imagegen:local
+    restart: unless-stopped
+    environment:
+      IMAGEGEN_TOKEN: ${IMAGEGEN_TOKEN:?set IMAGEGEN_TOKEN in .env (openssl rand -hex 32)}
+      HF_HOME: /models
+      # Offline by default: the weights come from the one-shot `imagegen-download` (profile `setup`), and this
+      # service has no internet access anyway (internal network only).
+      HF_HUB_OFFLINE: ${IMAGEGEN_HF_OFFLINE:-1}
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+    volumes:
+      - hf-models:/models
+    # Internal network only: BiRefNet runs reviewed remote code (trust_remote_code); nothing may phone home.
+    networks: [backend]
+    # Writes go only to /models (volume) and /tmp (tmpfs, caches).
+    read_only: true
+    tmpfs:
+      - /tmp
+    shm_size: 1gb
+    # FLUX.2 klein 4B with CPU offload keeps ~15 GB in RAM; x4 upscales of large files add a few GB.
+    mem_limit: ${LIMIT_MEM_IMAGEGEN:-28g}
+    pids_limit: 1024
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    <<: *gpu
+    stop_grace_period: 1m
+    logging: *logging
+
+  # One-shot weight download (about 15.5 GB):  ./deploy/compose.sh --profile setup run --rm imagegen-download
+  # The only time the sidecar's code gets internet access. Downloads exactly the pinned revisions into the
+  # `hf-models` volume and exits; no GPU. HF_TOKEN (only if a repository asks for it) comes from .env.imagegen.
+  imagegen-download:
+    image: etsy-agents/imagegen:local
+    # Built by the `imagegen` service (`./deploy/compose.sh build`); never pulled from a registry.
+    pull_policy: never
+    profiles: [setup]
+    command: ["python", "-m", "imagegen.download"]
+    environment:
+      IMAGEGEN_TOKEN: ${IMAGEGEN_TOKEN:?set IMAGEGEN_TOKEN in .env (openssl rand -hex 32)}
+      HF_HOME: /models
+      HF_HUB_OFFLINE: "0"
+    env_file:
+      - path: ../.env.imagegen
+        required: false
+    volumes:
+      - hf-models:/models
+    networks: [egress]
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    healthcheck:
+      disable: true
+    restart: "no"
+    logging: *logging
+
+  # One-shot: applies SQL migrations before the worker and the desk start.
+  migrate:
+    build: *worker-build
+    image: etsy-agents/worker:local
+    command: ["migrate"]
+    user: "1000:1000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - path: ../.env
+        required: true
+    environment:
+      <<: *app-env
+    networks: [backend]
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    init: true
+    restart: "no"
+    logging: *logging
+
+  worker:
+    build: *worker-build
+    image: etsy-agents/worker:local
+    command: ["run"]
+    user: "1000:1000"
+    restart: unless-stopped
+    depends_on:
+      init-volumes:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+      ollama:
+        condition: service_started
+    env_file:
+      - path: ../.env
+        required: true
+      # Worker-only keys (cloud LLM, Recraft, Pinterest): never in the desk.
+      - path: ../.env.worker
+        required: false
+    environment:
+      <<: *app-env
+    volumes:
+      - blobs:/data/blobs
+    networks: [backend, egress]
+    read_only: true
+    tmpfs:
+      - /tmp
+    mem_limit: ${LIMIT_MEM_WORKER:-4g}
+    pids_limit: 512
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    init: true
+    # SIGTERM lets the current job finish (image generation and LLM calls can take minutes). A job killed
+    # anyway is requeued by the stale-lock check after 15 minutes.
+    stop_grace_period: 5m
+    logging: *logging
+
+  desk:
+    build:
+      context: ..
+      dockerfile: apps/desk/Dockerfile.desk
+    image: etsy-agents/desk:local
+    user: "1000:1000"
+    restart: unless-stopped
+    depends_on:
+      init-volumes:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+    env_file:
+      - path: ../.env
+        required: true
+      # Desk-only secrets: no other container gets the password hash or the session-signing key.
+      - path: ../.env.desk
+        required: false
+    environment:
+      <<: *app-env
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      # Uploads of edited designs, and the rotated Etsy refresh token shared with the worker.
+      - blobs:/data/blobs
+    networks: [backend, egress]
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /app/apps/desk/.next/cache
+    mem_limit: ${LIMIT_MEM_DESK:-4g}
+    pids_limit: 512
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    init: true
+    logging: *logging
+
+networks:
+  backend:
+    internal: true
+  egress: {}
+
+volumes:
+  pgdata: {}
+  ollama: {}
+  hf-models: {}
+  blobs: {}

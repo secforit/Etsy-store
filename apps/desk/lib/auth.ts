@@ -143,13 +143,15 @@ export function signSession(secret: string, issuedAtMs: number, nonce: Buffer = 
 
 /**
  * Verifies signature (timing-safe), issued-at and the 12 h lifetime. Returns null for anything invalid,
- * including a missing/short secret, so callers fail closed.
+ * including a missing/short secret, so callers fail closed. `notBeforeMs` (from a sign-out) rejects every
+ * session issued at or before that instant.
  */
 export function verifySession(
   token: string | undefined | null,
   secret: string | undefined | null,
   nowMs: number,
   maxAgeMs: number = SESSION_MAX_AGE_MS,
+  notBeforeMs: number = 0,
 ): Session | null {
   if (!token || !secret || secret.length < MIN_SESSION_SECRET_LENGTH) return null;
   if (token.length > 256) return null;
@@ -166,6 +168,7 @@ export function verifySession(
   const issuedAtMs = Number(issuedAtRaw);
   if (issuedAtMs > nowMs + MAX_FUTURE_SKEW_MS) return null;
   if (nowMs - issuedAtMs >= maxAgeMs) return null;
+  if (notBeforeMs > 0 && issuedAtMs <= notBeforeMs) return null;
   return { actor: DESK_ACTOR, issuedAtMs, expiresAtMs: issuedAtMs + maxAgeMs };
 }
 
@@ -178,4 +181,24 @@ export function sessionCookieOptions(): {
   maxAge: number;
 } {
   return { httpOnly: true, secure: true, sameSite: 'strict', path: '/', maxAge: SESSION_MAX_AGE_SECONDS };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Sign-out
+// ---------------------------------------------------------------------------------------------
+
+const NOT_BEFORE_KEY = Symbol.for('etsy-agents.desk.sessionsNotBefore');
+
+/**
+ * Single user, stateless cookies: signing out revokes EVERY session issued up to now (all devices),
+ * so a copied cookie stops working too. Kept in process memory (a restart forgets it; rotating
+ * DESK_SESSION_SECRET is the durable "sign out everywhere").
+ */
+export function revokeAllSessions(nowMs: number): void {
+  const g = globalThis as unknown as Record<symbol, number | undefined>;
+  g[NOT_BEFORE_KEY] = Math.max(g[NOT_BEFORE_KEY] ?? 0, nowMs);
+}
+
+export function sessionsNotBeforeMs(): number {
+  return (globalThis as unknown as Record<symbol, number | undefined>)[NOT_BEFORE_KEY] ?? 0;
 }

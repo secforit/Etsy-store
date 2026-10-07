@@ -6,7 +6,7 @@
  */
 import { refresh } from 'next/cache';
 import { headers } from 'next/headers';
-import { redirect } from 'next/navigation';
+import { redirect, RedirectType } from 'next/navigation';
 import { DeskError } from '@etsy-agents/core/desk/contracts.ts';
 import type { ActionState } from './actionState.ts';
 import { MAX_PASSWORD_LENGTH, verifyPassword } from './auth.ts';
@@ -24,11 +24,20 @@ import {
   parseSettingsForm,
   safeNextPath,
 } from './validate.ts';
+import type { DoneKey } from './validate.ts';
 
 const GLOBAL_KEY = '*';
 /** Each scrypt check (N=2^17) holds ~128 MiB; bound how many run at once. */
 const MAX_CONCURRENT_LOGINS = 2;
 let inFlightLogins = 0;
+
+/**
+ * After a successful product action the page re-renders without the form that was used (the state moved on),
+ * so the confirmation travels as a fixed `?done=` key instead of the form's own state.
+ */
+function backToProduct(productId: string, done: DoneKey): never {
+  redirect(`/products/${productId}?done=${done}`, RedirectType.replace);
+}
 
 function fail(message: string): ActionState {
   return { ok: false, message };
@@ -90,10 +99,15 @@ export async function loginAction(_prev: ActionState, formData: FormData): Promi
   redirect(safeNextPath(formData.get('next')));
 }
 
+/**
+ * The action is reachable without a session (any page that renders it, including the public /login, accepts
+ * the POST), so only a request with a valid session revokes sessions; anything else just clears its own cookie.
+ */
 export async function logoutAction(): Promise<void> {
   await assertSameOrigin();
-  await endSession();
-  log.info({ actor: 'razvan' }, 'logout');
+  const revoked = await endSession();
+  if (revoked) log.info({ actor: 'razvan' }, 'logout');
+  else log.warn({}, 'logout without a valid session: cookie cleared, no session revoked');
   redirect('/login');
 }
 
@@ -148,8 +162,7 @@ export async function uploadEditedAction(_prev: ActionState, formData: FormData)
   } catch (err) {
     return toUserMessage('uploadEditedDesign', err);
   }
-  refresh();
-  return { ok: true, message: 'Edited design uploaded. The Listing Writer picks it up next.' };
+  backToProduct(productId, 'uploaded');
 }
 
 export async function approveAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
@@ -162,8 +175,7 @@ export async function approveAction(_prev: ActionState, formData: FormData): Pro
   } catch (err) {
     return toUserMessage('approve', err);
   }
-  refresh();
-  return { ok: true, message: 'Approved. The Etsy listing is being activated.' };
+  backToProduct(productId, 'approved');
 }
 
 export async function rejectAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
@@ -178,6 +190,5 @@ export async function rejectAction(_prev: ActionState, formData: FormData): Prom
   } catch (err) {
     return toUserMessage('reject', err);
   }
-  refresh();
-  return { ok: true, message: 'Rejected. The reason will steer future designs and listings.' };
+  backToProduct(productId, 'rejected');
 }

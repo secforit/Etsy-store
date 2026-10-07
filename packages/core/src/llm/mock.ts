@@ -6,6 +6,7 @@
  * an image prompt, a listing, a passing mockup check and a weekly report.
  */
 import type { AgentName } from '../domain/types.ts';
+import type { GpuCoordinator } from '../integrations/types.ts';
 import { LlmError, type LlmClient, type LlmRequest, type LlmResponse } from './types.ts';
 
 type Data = Record<string, unknown>;
@@ -111,7 +112,17 @@ const CANDIDATES: Record<AgentName, (data: Data, req: LlmRequest<unknown>) => un
 export class MockLlm implements LlmClient {
   readonly calls: { agent: AgentName; hasImages: boolean }[] = [];
 
-  async generate<T>(req: LlmRequest<T>): Promise<LlmResponse<T>> {
+  /**
+   * @param gpu optional coordinator: when given (createLlm in MODE=mock), every call runs inside
+   *   gpu.withGpu('llm', ...) like OllamaLlm, so mock runs exercise the same GPU serialisation and nesting rules.
+   */
+  constructor(private readonly gpu: GpuCoordinator | null = null) {}
+
+  generate<T>(req: LlmRequest<T>): Promise<LlmResponse<T>> {
+    return this.gpu ? this.gpu.withGpu('llm', () => this.generateNow(req)) : this.generateNow(req);
+  }
+
+  private async generateNow<T>(req: LlmRequest<T>): Promise<LlmResponse<T>> {
     this.calls.push({ agent: req.agent, hasImages: (req.images?.length ?? 0) > 0 });
     const data = asObj(req.untrustedData);
     for (const candidate of CANDIDATES[req.agent](data, req as LlmRequest<unknown>)) {

@@ -1,6 +1,7 @@
 /**
  * Authenticated asset download (raw art, edited file, print file). Private, never cached.
  */
+import { ASSET_CSP } from '../../../../../../lib/csp.ts';
 import { getDeskService } from '../../../../../../lib/service.ts';
 import { getSession } from '../../../../../../lib/session.ts';
 import { describeError, log } from '../../../../../../lib/log.ts';
@@ -45,7 +46,7 @@ export async function GET(request: Request, ctx: { params: Promise<{ id: string;
       'content-type': type,
       'content-length': String(body.byteLength),
       'content-disposition': `${download || type === 'application/octet-stream' ? 'attachment' : 'inline'}; filename="${filename}"`,
-      'content-security-policy': "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox",
+      'content-security-policy': ASSET_CSP,
     },
   });
 }

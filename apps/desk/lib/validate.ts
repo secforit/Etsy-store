@@ -39,6 +39,19 @@ export function safeNextPath(value: unknown): string {
   return value;
 }
 
+/** Confirmation shown on the product page after a successful action (`?done=<key>`); fixed texts only. */
+export const DONE_NOTICES = {
+  uploaded: 'Edited design uploaded. The Listing Writer picks it up next.',
+  approved: 'Approved. The Etsy listing is now active.',
+  rejected: 'Rejected. The reason will steer future designs and listings.',
+} as const;
+export type DoneKey = keyof typeof DONE_NOTICES;
+
+export function doneNotice(raw: unknown): string | null {
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  return typeof value === 'string' && Object.hasOwn(DONE_NOTICES, value) ? DONE_NOTICES[value as DoneKey] : null;
+}
+
 export const REJECT_REASON_MAX = 500;
 
 export type Parsed<T> = { ok: true; value: T } | { ok: false; message: string };

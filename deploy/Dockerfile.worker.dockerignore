@@ -1,0 +1,25 @@
+# Build-context filter for deploy/Dockerfile.worker (BuildKit picks up <Dockerfile>.dockerignore).
+# Never send secrets, local data or build output to the builder.
+**/node_modules
+**/.next
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/secrets
+data
+**/data/blobs
+**/*.log
+**/coverage
+**/dist
+**/.DS_Store
+**/*.tsbuildinfo
+.git
+docs
+deploy
+apps/imagegen
+# The desk app is not part of this image, but its manifest is needed by `npm ci` (workspace lockfile).
+apps/desk/**
+!apps/desk/package.json
+# Tests are not shipped.
+**/*.test.ts

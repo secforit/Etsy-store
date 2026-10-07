@@ -1,0 +1,59 @@
+[project]
+name = "etsy-agents-imagegen"
+version = "0.1.0"
+description = "GPU sidecar: FLUX.2 [klein] 4B text-to-image, BiRefNet matting, Real-ESRGAN x4plus upscaling (RTX 3060 12 GB)."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = "Apache-2.0"
+# HTTP layer only: enough to run the API and its tests with fake pipelines (no torch).
+dependencies = [
+  "fastapi==0.142.2",
+  "uvicorn==0.54.0",
+  "pydantic==2.13.5",
+  "pillow==12.3.0",
+  "numpy==2.5.3",
+]
+
+[project.optional-dependencies]
+# The real pipelines. torch 2.14.1 on Linux x86_64 from PyPI is the CUDA 13.0 build (cuda-toolkit 13.0.3 wheels),
+# which ships kernels for sm_75/sm_80/sm_86/sm_90 and runs on the host's driver 595 (CUDA 13.2): forward compatible.
+# The same build is on https://download.pytorch.org/whl/cu130 as 2.14.1+cu130.
+gpu = [
+  "torch==2.14.1",
+  "torchvision==0.29.1",
+  "diffusers==0.41.0",          # first-class Flux2KleinPipeline
+  "transformers==5.19.0",       # Qwen3 text encoder for FLUX.2 klein; BiRefNet remote code
+  "accelerate==1.15.0",         # enable_model_cpu_offload()
+  "huggingface-hub==1.33.0",    # diffusers 0.41 requires <2.0
+  "safetensors==0.8.0",
+  "spandrel==0.4.2",            # Real-ESRGAN loader
+  # imported by BiRefNet's pinned remote code (birefnet.py)
+  "timm==1.0.30",
+  "kornia==0.8.3",
+  "einops==0.8.2",
+]
+dev = [
+  "pytest==9.1.1",
+  "httpx==0.28.1",
+]
+
+[build-system]
+requires = ["hatchling==1.32.4"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/imagegen"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-ra"
+filterwarnings = [
+  "error::DeprecationWarning:imagegen.*",
+  # starlette 1.x nudges toward httpx2 for its TestClient; httpx still works
+  "ignore:Using `httpx` with `starlette.testclient` is deprecated",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"

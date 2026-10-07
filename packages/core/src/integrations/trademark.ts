@@ -2,16 +2,38 @@
  * USPTO word-mark search through the Marker API v2 (https://markerapi.com).
  * GET https://markerapi.com/api/v2/trademarks/trademark/{term}/status/{active|all}/start/{n}/username/{u}/password/{p}
  * Credentials travel in the URL PATH (Marker's design), so URLs are never logged and HTTP errors carry only an
- * operation label. Each search runs an exact query and a trailing-wildcard query (`term*`), deduped by serial.
+ * operation label. Each search runs an exact query and, unless `{prefix: false}`, a trailing-wildcard query
+ * (`term*`), deduped by serial. Marker never returns a mark that is SHORTER than the term: a mark inside a longer
+ * phrase is only found by searching the phrase's sub-phrases (see agents/complianceGuard.ts).
  * Response: {count, trademarks: [{serialnumber, wordmark, code, description, registrationdate, status?, ...}], next?}.
  */
 import type { TrademarkHit } from '../domain/types.ts';
 import type { Logger } from '../orchestrator/contracts.ts';
-import { HttpClient, createServiceBucket, type Clock, type FetchLike } from './http.ts';
+import { HttpClient, createServiceBucket, systemClock, type Clock, type FetchLike } from './http.ts';
 import type { TrademarkClient } from './types.ts';
 import { noopLogger } from './util.ts';
 
 export const MARKER_BASE_URL = 'https://markerapi.com/api/v2/trademarks/trademark';
+
+/** Optional second argument of `TrademarkClient.search` (the contract keeps the one-argument form). */
+export interface TrademarkSearchOptions {
+  /** Also run the trailing-wildcard query `term*` (marks that START with the term). Default true. */
+  prefix?: boolean;
+}
+
+type SearchWithOptions = (term: string, opts?: TrademarkSearchOptions) => Promise<TrademarkHit[]>;
+
+/**
+ * `client.search(term, opts)`. A client that ignores the options runs its default search, which is a superset of
+ * the exact-only one, so passing options can only narrow the query, never hide a mark the default would find.
+ */
+export function searchTrademark(client: TrademarkClient, term: string, opts: TrademarkSearchOptions = {}): Promise<TrademarkHit[]> {
+  return (client.search as SearchWithOptions).call(client, term, opts);
+}
+
+/** Successful query results are reused for this long: concept check, Listing Writer and final check share terms. */
+export const DEFAULT_TRADEMARK_CACHE_TTL_MS = 12 * 3600_000;
+const DEFAULT_TRADEMARK_CACHE_MAX_ENTRIES = 2000;
 
 /** Lowercase, collapse whitespace, keep letters/digits/space/&'- only (no path characters). */
 export function normaliseTrademarkTerm(term: string): string {
@@ -74,6 +96,9 @@ export function mapMarkerRow(row: MarkerRow): TrademarkHit | null {
 export class LiveTrademarkClient implements TrademarkClient {
   private readonly http: HttpClient;
   private readonly logger: Logger;
+  private readonly clock: Clock;
+  /** Query string -> hits of a SUCCESSFUL query (errors are never cached, so a failed search always fails). */
+  private readonly cache = new Map<string, { at: number; hits: TrademarkHit[] }>();
 
   constructor(
     private readonly opts: {
@@ -87,10 +112,14 @@ export class LiveTrademarkClient implements TrademarkClient {
       wildcard?: boolean;
       /** Pages per query (100 rows each; default 2). */
       maxPages?: number;
+      /** Reuse a query's result for this long (default 12 h; 0 disables the cache). */
+      cacheTtlMs?: number;
+      cacheMaxEntries?: number;
     },
   ) {
     if (!opts.username || !opts.password) throw new Error('marker: MARKER_API_USERNAME/PASSWORD required');
     this.logger = opts.logger ?? noopLogger;
+    this.clock = opts.clock ?? systemClock;
     this.http = new HttpClient({
       service: 'marker',
       fetch: opts.fetch,
@@ -127,14 +156,29 @@ export class LiveTrademarkClient implements TrademarkClient {
     return hits;
   }
 
-  async search(term: string): Promise<TrademarkHit[]> {
+  private async cachedQuery(q: string): Promise<TrademarkHit[]> {
+    const ttl = this.opts.cacheTtlMs ?? DEFAULT_TRADEMARK_CACHE_TTL_MS;
+    const now = this.clock.now();
+    const hit = this.cache.get(q);
+    if (hit && ttl > 0 && now - hit.at < ttl) return hit.hits.map((h) => ({ ...h, classes: [...h.classes] }));
+    const hits = await this.query(q);
+    if (ttl > 0) {
+      this.cache.delete(q);
+      this.cache.set(q, { at: now, hits });
+      const max = this.opts.cacheMaxEntries ?? DEFAULT_TRADEMARK_CACHE_MAX_ENTRIES;
+      while (this.cache.size > max) this.cache.delete(this.cache.keys().next().value as string);
+    }
+    return hits.map((h) => ({ ...h, classes: [...h.classes] }));
+  }
+
+  async search(term: string, opts: TrademarkSearchOptions = {}): Promise<TrademarkHit[]> {
     const t = normaliseTrademarkTerm(term);
     if (t.length < 2) return [];
     const queries = [t];
-    if (this.opts.wildcard !== false) queries.push(`${t}*`);
+    if (this.opts.wildcard !== false && opts.prefix !== false) queries.push(`${t}*`);
     const bySerial = new Map<string, TrademarkHit>();
-    for (const q of queries) for (const hit of await this.query(q)) bySerial.set(hit.serial, hit);
-    this.logger.debug({ term: t, hits: bySerial.size }, 'marker: search done');
+    for (const q of queries) for (const hit of await this.cachedQuery(q)) bySerial.set(hit.serial, hit);
+    this.logger.debug({ term: t, prefix: queries.length > 1, hits: bySerial.size }, 'marker: search done');
     return [...bySerial.values()];
   }
 }

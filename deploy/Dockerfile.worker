@@ -1,0 +1,46 @@
+# syntax=docker/dockerfile:1.7
+#
+# Worker image: the orchestrator loop and the operator CLI (migrate, run, demo, setup-catalog, hash-password,
+# check-gpu, status, retry-failed). Build from the REPOSITORY ROOT:
+#   docker build -f deploy/Dockerfile.worker -t etsy-agents/worker:local .
+# Compose: build: { context: .., dockerfile: deploy/Dockerfile.worker }
+# BuildKit uses deploy/Dockerfile.worker.dockerignore for this build (keeps .env, data and node_modules out).
+#
+# The TypeScript sources run directly through tsx (no build step, same code as the tests). Code is owned by
+# root and read-only for the app user; the container runs as `node` (uid 1000) with a read-only root
+# filesystem, writing only to /tmp (tmpfs) and the blob volume (/data/blobs).
+
+ARG NODE_IMAGE=node:22-slim
+
+# ---- deps: only the worker workspace (core + worker deps + root dev tools such as tsx), from the lockfile ----
+FROM ${NODE_IMAGE} AS deps
+WORKDIR /app
+COPY package.json package-lock.json tsconfig.base.json ./
+# Every workspace manifest recorded in package-lock.json must be present for `npm ci`.
+COPY packages/core/package.json packages/core/package.json
+COPY apps/worker/package.json apps/worker/package.json
+COPY apps/desk/package.json apps/desk/package.json
+RUN npm ci --no-audit --no-fund --workspace @etsy-agents/worker --include-workspace-root \
+ && npm cache clean --force
+
+# ---- runtime ------------------------------------------------------------------------------------------------
+FROM ${NODE_IMAGE} AS runtime
+ENV NODE_ENV=production \
+    STORAGE_DIR=/data/blobs \
+    WORKER_HEARTBEAT_PATH=/tmp/worker-heartbeat
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY package.json tsconfig.base.json ./
+COPY packages/core/package.json packages/core/tsconfig.json packages/core/
+COPY packages/core/src packages/core/src
+COPY apps/worker/package.json apps/worker/tsconfig.json apps/worker/
+COPY apps/worker/src apps/worker/src
+RUN mkdir -p /data/blobs && chown node:node /data/blobs && chmod 750 /data/blobs
+
+USER node
+# Liveness for `run`: the worker touches the heartbeat file every 30 s (jobs can take minutes, the heartbeat
+# keeps going while they run). One-shot commands (migrate, status...) finish long before the first check.
+HEALTHCHECK --interval=60s --timeout=10s --start-period=120s --retries=3 \
+  CMD ["node", "-e", "const f=process.env.WORKER_HEARTBEAT_PATH||'/tmp/worker-heartbeat';try{process.exit(Date.now()-require('node:fs').statSync(f).mtimeMs<180000?0:1)}catch{process.exit(1)}"]
+ENTRYPOINT ["node", "--import", "tsx", "apps/worker/src/cli.ts"]
+CMD ["run"]

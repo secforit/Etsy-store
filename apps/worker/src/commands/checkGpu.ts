@@ -92,13 +92,13 @@ export function printGpuCheck(io: Io, env: Env, r: GpuCheckResult): void {
     io.out(`  loaded in VRAM : ${r.ollama.loaded.join(', ') || 'none'}`);
   }
   for (const m of r.ollama.missing) {
-    io.out(`  MISSING model ${m}: docker compose -f deploy/docker-compose.yml exec ollama ollama pull ${m}`);
+    io.out(`  MISSING model ${m}: ./deploy/compose.sh exec ollama ollama pull ${m}`);
   }
-  if (!r.ollama.reachable) io.out('  Check: docker compose -f deploy/docker-compose.yml ps ollama; logs: ... logs ollama');
+  if (!r.ollama.reachable) io.out('  Check: ./deploy/compose.sh ps ollama && ./deploy/compose.sh logs --tail 50 ollama');
   if (r.imagegen.required) {
     io.out(`Imagegen ${env.IMAGEGEN_BASE_URL}: ${r.imagegen.ok ? 'ok' : `NOT ready (${r.imagegen.error ?? 'unknown'})`}`);
     if (r.imagegen.reachable) io.out(`  loaded models  : ${r.imagegen.loaded.join(', ') || 'none (lazy-loaded on first request)'}`);
-    if (!r.imagegen.ok) io.out('  Check: docker compose -f deploy/docker-compose.yml logs imagegen; token must match IMAGEGEN_TOKEN');
+    if (!r.imagegen.ok) io.out('  Check: ./deploy/compose.sh logs --tail 50 imagegen (the sidecar and the worker must share IMAGEGEN_TOKEN)');
   } else {
     io.out(`Imagegen : not used (IMAGEGEN_PROVIDER=${env.IMAGEGEN_PROVIDER})`);
   }

@@ -130,12 +130,86 @@ describe('QA & Publisher happy path', () => {
     expect(s.imageTools.toPrintCalls[0]?.spec).toEqual({ widthPx: 2475, heightPx: 1155, dpi: 300 });
   });
 
-  it('continues without the vision check when mockups cannot be fetched', async () => {
+  it('hands a new Printify product id to onPrintifyProductCreated before publishing', async () => {
+    const s = await setup();
+    const events: string[] = [];
+    const origPublish = s.printify.publishProduct.bind(s.printify);
+    s.printify.publishProduct = async (id: string) => {
+      events.push(`publish:${id}`);
+      return origPublish(id);
+    };
+    const { output } = await runQaPublisher(input(), {
+      ...s.deps,
+      onPrintifyProductCreated: async (id: string) => {
+        events.push(`created:${id}`);
+      },
+    });
+    expect(output.status).toBe('drafted');
+    expect(events).toEqual(['created:pfy-1', 'publish:pfy-1']);
+  });
+
+  it('does not call onPrintifyProductCreated for a reused product', async () => {
+    const s = await setup();
+    s.printify.products.set('pfy-9', { id: 'pfy-9', title: 't', mockupUrls: [], external: { id: '555', handle: null }, isLocked: false });
+    const created: string[] = [];
+    await runQaPublisher(input({ existingPrintifyProductId: 'pfy-9' }), { ...s.deps, onPrintifyProductCreated: async (id: string) => void created.push(id) });
+    expect(created).toEqual([]);
+  });
+
+  it('does not publish when persisting the new product id fails (pending error carries the id)', async () => {
+    const s = await setup();
+    const err = await runQaPublisher(input(), {
+      ...s.deps,
+      onPrintifyProductCreated: async () => {
+        throw new Error('db down');
+      },
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(PrintifyProductPendingError);
+    expect(err.printifyProductId).toBe('pfy-1');
+    expect(s.printify.publishes).toHaveLength(0);
+  });
+});
+
+describe('QA & Publisher vision check fails closed', () => {
+  it('never publishes when no mockup can be loaded: retries later with the same product', async () => {
     const s = await setup({ fetchFails: true });
+    const err = await runQaPublisher(input(), s.deps).catch((e) => e);
+    expect(err).toBeInstanceOf(PrintifyProductPendingError);
+    expect(err.printifyProductId).toBe('pfy-1');
+    expect(err.message).toContain('not publishing');
+    expect(s.printify.publishes).toHaveLength(0);
+    expect(s.llm.requests).toHaveLength(0);
+    expect(s.fetched).toHaveLength(9); // 3 in-run tries x 3 mockups
+    expect(s.sleeps).toEqual([1000, 1000]);
+  });
+
+  it('never publishes when Printify has no mockups yet; qa_failed on the final attempt', async () => {
+    const s = await setup();
+    s.printify.mockupUrls = [];
+    const { output } = await runQaPublisher(input(), { ...s.deps, finalAttempt: true });
+    expect(output.status).toBe('qa_failed');
+    if (output.status !== 'qa_failed') return;
+    expect(output.qaNotes[0]).toContain('mockup check could not run');
+    expect(output.qaNotes.join(' ')).toContain('pfy-1'); // the orphan product is named
+    expect(output.printifyProductId).toBeNull();
+    expect(s.printify.publishes).toHaveLength(0);
+  });
+
+  it('checks mockups that appear during the in-run retries, then publishes', async () => {
+    const s = await setup();
+    s.printify.mockupUrls = [];
+    let gets = 0;
+    const origGet = s.printify.getProduct.bind(s.printify);
+    s.printify.getProduct = async (id: string) => {
+      const p = await origGet(id);
+      if (++gets >= 2 && p.mockupUrls.length === 0) p.mockupUrls = ['https://images.printify.com/mockup/late.jpg'];
+      return p;
+    };
     const { output, llmUsage } = await runQaPublisher(input(), s.deps);
     expect(output.status).toBe('drafted');
-    expect(llmUsage).toHaveLength(0);
-    expect(output.qaNotes.join(' ')).toContain('vision check was skipped');
+    expect(llmUsage).toHaveLength(1);
+    expect(s.fetched).toEqual(['https://images.printify.com/mockup/late.jpg']);
+    expect(s.printify.publishes).toEqual(['pfy-1']);
   });
 });
 

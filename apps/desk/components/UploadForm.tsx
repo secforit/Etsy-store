@@ -7,7 +7,8 @@ import { IDLE } from '../lib/actionState.ts';
 import { FormMessage } from './FormMessage.tsx';
 import { SubmitButton } from './SubmitButton.tsx';
 
-const MAX_BYTES = 50 * 1024 * 1024;
+/** 50 MB, minus headroom for the multipart envelope so the request stays within the 50mb body limit. */
+const MAX_BYTES = 50 * 1024 * 1024 - 64 * 1024;
 
 export function UploadForm({ productId }: { productId: string }) {
   const [state, action] = useActionState(uploadEditedAction, IDLE);

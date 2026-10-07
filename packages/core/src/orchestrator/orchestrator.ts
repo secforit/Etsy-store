@@ -61,6 +61,7 @@ export class Orchestrator {
       ...DEFAULT_STEP_OPTIONS,
       ...(options.reportIntervalMs !== undefined ? { reportIntervalMs: options.reportIntervalMs } : {}),
       ...(options.maxSignalsPerScan !== undefined ? { maxSignalsPerScan: options.maxSignalsPerScan } : {}),
+      ...(options.imageGenCostUsd !== undefined ? { imageGenCostUsd: Math.max(0, options.imageGenCostUsd) } : {}),
       ...(options.qaPublish ? { qaPublish: options.qaPublish } : {}),
     };
     this.handlers = { ...STEP_HANDLERS, ...(options.handlers ?? {}) };

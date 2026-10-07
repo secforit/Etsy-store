@@ -30,7 +30,7 @@ import {
   type ProductState,
 } from '../domain/types.ts';
 import type { TrendSignalInput } from '../integrations/types.ts';
-import { LlmError, type LlmUsage } from '../llm/types.ts';
+import { LlmError, type LlmClient, type LlmRequest, type LlmResponse, type LlmUsage } from '../llm/types.ts';
 import { auditExternalWrite } from './audit.ts';
 import { latestAvoidRules } from './avoidRules.ts';
 import type { Logger, OrchestratorDeps } from './contracts.ts';
@@ -66,11 +66,17 @@ export interface StepOptions {
   reportIntervalMs: number;
   /** Max trend signals kept per scan. */
   maxSignalsPerScan: number;
+  /**
+   * USD per generated image when images come from a cloud provider (IMAGEGEN_PROVIDER=recraft); 0 for the local
+   * FLUX.2 klein sidecar. Recorded as a designer agent_run so the daily cloud spend cap counts it.
+   */
+  imageGenCostUsd: number;
 }
 
 export const DEFAULT_STEP_OPTIONS: StepOptions = {
   reportIntervalMs: 24 * 3600_000,
   maxSignalsPerScan: 300,
+  imageGenCostUsd: 0,
 };
 
 export interface StepResult {
@@ -83,6 +89,11 @@ export interface StepContext {
   job: Job;
   today: string;
   options: StepOptions;
+  /**
+   * The LLM handed to agents (deps.llm wrapped): it remembers the usage of every call, so `runAgent` can still
+   * record (and bill) calls made before an agent threw, e.g. a paid cloud call followed by a failing API write.
+   */
+  llm: LlmClient;
   /** Calls an agent, records agent_runs for every LLM call, validates the output against the contract schema. */
   runAgent<T>(agent: AgentName, schema: z.ZodType<T>, fn: () => Promise<AgentResult<T>>): Promise<T>;
   /** Runs `fn` in one transaction that also marks the job done. */
@@ -127,22 +138,48 @@ function usageFromError(err: unknown): LlmUsage | null {
 
 export function createStepContext(deps: OrchestratorDeps, job: Job, options: StepOptions): StepContext {
   let committed = false;
+  /** Usage of every LLM call made through ctx.llm during this job (successful, or failed with reported usage). */
+  const llmCalls: LlmUsage[] = [];
+  const llm: LlmClient = {
+    async generate<T>(req: LlmRequest<T>): Promise<LlmResponse<T>> {
+      try {
+        const res = await deps.llm.generate(req);
+        llmCalls.push(res.usage);
+        return res;
+      } catch (err) {
+        const usage = usageFromError(err);
+        if (usage) llmCalls.push(usage);
+        throw err;
+      }
+    },
+  };
   const ctx: StepContext = {
     deps,
     job,
     today: isoDate(deps.now()),
     options,
+    llm,
     get committed() {
       return committed;
     },
     async runAgent<T>(agent: AgentName, schema: z.ZodType<T>, fn: () => Promise<AgentResult<T>>): Promise<T> {
       let result: AgentResult<T>;
+      const callsBefore = llmCalls.length;
       try {
         result = await fn();
       } catch (err) {
-        const usage = usageFromError(err);
-        if (usage) {
-          await insertAgentRun(deps.db, { jobId: job.id, agent, usage, ok: false, error: errorMessage(err, 1000) }, deps.now());
+        // The agent's own usage list is lost with the exception: record what the wrapped LLM saw instead, so the
+        // spend cap counts paid calls even when a later step of the agent (Marker, Printify, sidecar) failed.
+        const seen = llmCalls.slice(callsBefore);
+        const fromError = usageFromError(err);
+        const usages = seen.length > 0 ? seen : fromError ? [fromError] : [];
+        const message = errorMessage(err, 1000);
+        for (const usage of usages) {
+          try {
+            await insertAgentRun(deps.db, { jobId: job.id, agent, usage, ok: false, error: message }, deps.now());
+          } catch (dbErr) {
+            deps.logger.error({ agent, jobId: job.id, err: errorMessage(dbErr, 300) }, 'could not record the LLM usage of a failed agent run');
+          }
         }
         throw err;
       }
@@ -183,7 +220,7 @@ export function createStepContext(deps: OrchestratorDeps, job: Job, options: Ste
 /* --------------------------------- helpers --------------------------------- */
 
 function baseDeps(ctx: StepContext) {
-  return { llm: ctx.deps.llm, shop: ctx.deps.shop, today: ctx.today };
+  return { llm: ctx.llm, shop: ctx.deps.shop, today: ctx.today };
 }
 
 interface LoadedProduct {
@@ -532,6 +569,19 @@ const design: StepHandler = async (ctx) => {
     ),
   );
   assertDesignKey(out.artKey, product.id);
+  if (ctx.options.imageGenCostUsd > 0) {
+    // Cloud image generation (Recraft fallback) is paid per image: record it so the spend cap sees it.
+    await insertAgentRun(
+      db,
+      {
+        jobId: ctx.job.id,
+        agent: 'designer',
+        usage: { model: `image:${out.model}`, inputTokens: 0, outputTokens: 0, costUsd: ctx.options.imageGenCostUsd, durationMs: 0 },
+        ok: true,
+      },
+      ctx.deps.now(),
+    );
+  }
   await ctx.commit(async (q) => {
     const now = ctx.deps.now();
     await q.query(
@@ -651,6 +701,71 @@ const finalCheck: StepHandler = async (ctx) => {
 
 /* -------------------------------- qa_publish ------------------------------- */
 
+/**
+ * Printify published a listing that is not an Etsy draft (its Etsy connection is not in manual/draft mode).
+ * An active listing is buyer-visible and billed without Razvan's approval: deactivate it at once, then stop the
+ * product (blocked) with the ids recorded so the listing can be found and deleted on Etsy.
+ */
+async function stopNonDraftListing(
+  ctx: StepContext,
+  productId: string,
+  drafted: { printKey: string; printifyProductId: string; etsyListingId: number; qaNotes: string[] },
+  state: string,
+): Promise<StepResult> {
+  const { integrations, logger } = ctx.deps;
+  let deactivated = false;
+  if (state === 'active') {
+    await integrations.etsy.updateListing(drafted.etsyListingId, { state: 'inactive' });
+    deactivated = true;
+  }
+  const reason =
+    `Printify created Etsy listing ${drafted.etsyListingId} as "${state}", not as a draft, so it skipped your approval` +
+    `${deactivated ? '; it was deactivated' : ''}. Set Printify's Etsy publishing to drafts (manual), then delete or fix that listing on Etsy.`;
+  logger.error({ productId, etsyListingId: drafted.etsyListingId, state, deactivated }, 'qa_publish: Etsy listing is not a draft; product blocked');
+  await ctx.commit(async (q) => {
+    const now = ctx.deps.now();
+    await q.query('UPDATE designs SET print_key = $1, qa_notes = $2::jsonb, updated_at = $3 WHERE product_id = $4', [
+      drafted.printKey,
+      JSON.stringify(drafted.qaNotes),
+      now,
+      productId,
+    ]);
+    await q.query('UPDATE listings SET printify_product_id = $1, etsy_listing_id = $2, updated_at = $3 WHERE product_id = $4', [
+      drafted.printifyProductId,
+      drafted.etsyListingId,
+      now,
+      productId,
+    ]);
+    if (deactivated) {
+      await auditExternalWrite(
+        q,
+        {
+          actor: 'system',
+          service: 'etsy',
+          action: 'etsy.listing.deactivate',
+          entity: 'etsy_listing',
+          entityId: String(drafted.etsyListingId),
+          details: { productId, previousState: state, reason: 'not a draft after Printify publish' },
+        },
+        now,
+      );
+    }
+    await transitionProduct(q, { productId, from: 'final_cleared', event: 'qa_fail_final', actor: 'system', jobId: ctx.job.id, now, blockReason: reason });
+    await insertAudit(
+      q,
+      {
+        actor: 'system',
+        action: 'product.blocked',
+        entity: 'product',
+        entityId: productId,
+        details: { stage: 'qa_publish', reason, etsyListingId: drafted.etsyListingId, printifyProductId: drafted.printifyProductId, etsyState: state },
+      },
+      now,
+    );
+  });
+  return { status: 'done', note: `blocked: Etsy listing ${drafted.etsyListingId} was ${state}, not a draft` };
+}
+
 /** PrintifyProductPendingError (agents/qaPublisher.ts), duck-typed so this module does not depend on it. */
 export function pendingPrintifyId(err: unknown): string | null {
   const e = err as { name?: unknown; printifyProductId?: unknown } | null;
@@ -674,6 +789,21 @@ const qaPublish: StepHandler = async (ctx) => {
     imageTools: integrations.imageTools,
     upscaler: integrations.upscaler,
     fetchImage: integrations.fetchImage,
+    // Last try of this job: mockups that still cannot be checked fail QA instead of being retried.
+    finalAttempt: ctx.job.attempts >= ctx.job.maxAttempts,
+    // Saved before publishing, in its own transaction: a worker killed mid-publish reuses this product on the
+    // stale-lock retry instead of creating (and publishing) a second one.
+    onPrintifyProductCreated: async (printifyProductId: string) => {
+      await db.tx(async (q) => {
+        const now = ctx.deps.now();
+        await q.query('UPDATE listings SET printify_product_id = $1, updated_at = $2 WHERE product_id = $3', [printifyProductId, now, product.id]);
+        await insertAudit(
+          q,
+          { actor: 'qa_publisher', action: 'printify.product.saved', entity: 'product', entityId: product.id, details: { printifyProductId } },
+          now,
+        );
+      });
+    },
     ...(qa.sleep ? { sleep: qa.sleep } : {}),
     ...(qa.pollAttempts !== undefined ? { publishPollAttempts: qa.pollAttempts } : {}),
     ...(qa.pollIntervalMs !== undefined ? { publishPollIntervalMs: qa.pollIntervalMs } : {}),
@@ -713,6 +843,11 @@ const qaPublish: StepHandler = async (ctx) => {
 
   if (out.status === 'drafted') {
     const drafted = out;
+    // Approval gate, enforced in code: Printify's publish follows a store setting the code cannot see. The Etsy
+    // listing must be a DRAFT; anything else is taken down (if active) and the product is stopped. A failing
+    // Etsy call throws: the job retries and reuses the same Printify product.
+    const etsyListing = await integrations.etsy.getListing(drafted.etsyListingId);
+    if (etsyListing.state !== 'draft') return stopNonDraftListing(ctx, product.id, drafted, etsyListing.state);
     await ctx.commit(async (q) => {
       const now = ctx.deps.now();
       await q.query('UPDATE designs SET print_key = $1, qa_notes = $2::jsonb, updated_at = $3 WHERE product_id = $4', [
@@ -752,7 +887,10 @@ const qaPublish: StepHandler = async (ctx) => {
       now,
       product.id,
     ]);
-    // A Printify product made from the failed file is never reused (a redesign gets a fresh one).
+    // A Printify product made from the failed file is never reused (a redesign gets a fresh one). Its id was
+    // saved right after creation, so read it back for the audit row before clearing it.
+    const saved = await q.query<{ printify_product_id: string | null }>('SELECT printify_product_id FROM listings WHERE product_id = $1', [product.id]);
+    const orphanId = failed.printifyProductId ?? saved.rows[0]?.printify_product_id ?? listing.printifyProductId;
     await q.query('UPDATE listings SET printify_product_id = NULL, updated_at = $1 WHERE product_id = $2', [now, product.id]);
     await insertAudit(
       q,
@@ -765,7 +903,7 @@ const qaPublish: StepHandler = async (ctx) => {
           redesignsUsed: product.attempt,
           maxRedesigns: shop.caps.maxQaRedesigns,
           qaNotes: failed.qaNotes,
-          orphanPrintifyProductId: failed.printifyProductId ?? listing.printifyProductId,
+          orphanPrintifyProductId: orphanId,
         },
       },
       now,

@@ -62,6 +62,7 @@ export async function createIntegrations(env: Env, opts: CreateIntegrationsOptio
       storageDir: env.STORAGE_DIR,
       ...(opts.storage ? { storage: opts.storage } : {}),
       ...(opts.now ? { now: opts.now } : {}),
+      ...(opts.onExternalWrite ? { onExternalWrite: opts.onExternalWrite } : {}),
     });
   }
 

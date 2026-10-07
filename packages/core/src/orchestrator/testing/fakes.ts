@@ -288,8 +288,11 @@ export interface FakeAgentBehaviour {
   nicheDecision: 'accept' | 'reject';
   /** Compliance verdict per stage. */
   compliance: (input: ComplianceGuardInput) => Pick<ComplianceGuardOutput, 'verdict' | 'reasons' | 'blocklistHits'>;
-  /** QA outcome per call (call index is per product). */
-  qa: (input: QaPublisherInput, call: number) => 'drafted' | 'qa_failed' | 'pending' | 'throw';
+  /**
+   * QA outcome per call (call index is per product). 'created_then_throw' creates a new Printify product (reported
+   * through deps.onPrintifyProductCreated, like the real agent) and then dies with a plain error.
+   */
+  qa: (input: QaPublisherInput, call: number) => 'drafted' | 'qa_failed' | 'pending' | 'throw' | 'created_then_throw';
   retire: string[] | ((input: AnalystInput) => string[]);
   followUps: string[] | ((input: AnalystInput) => string[]);
   /** Throw this from a given agent. */
@@ -403,6 +406,11 @@ export function createFakeAgents(integrations: FakeIntegrations, overrides: Part
       const outcome = behaviour.qa(input, n);
       if (outcome === 'pending') throw new PendingProductError(input.existingPrintifyProductId ?? `pf-${input.productId.slice(0, 8)}`);
       if (outcome === 'throw') throw new Error('printify fake: 502 bad gateway');
+      if (outcome === 'created_then_throw') {
+        const hook = (deps as { onPrintifyProductCreated?: (id: string) => Promise<void> }).onPrintifyProductCreated;
+        if (!input.existingPrintifyProductId && hook) await hook(`pf-${input.productId.slice(0, 8)}`);
+        throw new Error('worker killed after Printify create');
+      }
       let output: QaPublisherOutput;
       if (outcome === 'drafted') {
         const etsyListingId = integrations.fakes.etsy.createDraft(input.listing.title);

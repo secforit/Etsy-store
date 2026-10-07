@@ -110,7 +110,38 @@ describe('runOnce gates', () => {
     expect(Number(rows[0]!.n)).toBeGreaterThan(0);
   });
 
+  it('counts cloud image generation (Recraft fallback) against the spend cap and holds design jobs at the cap', async () => {
+    const h = await harness({ costUsd: 0 });
+    await updateSettings(db, { dailySpendCapUsd: 0.1 }, h.clock.now());
+    const orch = new Orchestrator(h.deps, { cloudAgents: ['designer'], imageGenCostUsd: 0.08 });
+    const ids: string[] = [];
+    for (let i = 0; i < 2; i++) {
+      const id = await seedProduct(db, h.clock.now(), { state: 'cleared' });
+      await enqueue(db, { kind: 'design', productId: id, idempotencyKey: productStepKey('design', id, 0) }, h.clock.now());
+      h.clock.advance(1000);
+      ids.push(id);
+    }
+    expect((await orch.runOnce()).status).toBe('ran');
+    const { rows } = await db.query<{ model: string; cost_usd: unknown }>(`SELECT model, cost_usd FROM agent_runs WHERE cost_usd > 0`);
+    expect(rows.map((r) => [r.model, Number(r.cost_usd)])).toEqual([['image:fake-flux', 0.08]]);
+    expect((await orch.runOnce()).status).toBe('ran'); // 0.08 < 0.10: still allowed
+    const capped = await checkCaps(db, h.clock.now(), ['designer']);
+    expect(capped.spendTodayUsd).toBeCloseTo(0.16);
+    expect(capped.excludedKinds).toEqual(['design']);
+    for (const id of ids) expect((await productState(db, id)).state).toBe('designed');
+
+    // A third design job now waits for the next UTC day.
+    const third = await seedProduct(db, h.clock.now(), { state: 'cleared' });
+    await enqueue(db, { kind: 'design', productId: third, idempotencyKey: productStepKey('design', third, 0) }, h.clock.now());
+    expect((await orch.runOnce()).status).toBe('idle');
+    h.clock.set('2026-10-07T00:00:01.000Z');
+    expect((await orch.runOnce()).status).toBe('ran');
+    expect((await productState(db, third)).state).toBe('designed');
+  });
+
   it('maps routing config to cloud agents', () => {
+    expect(cloudAgentsFor({ MODE: 'live', LLM_DEFAULT_PROVIDER: 'ollama', LLM_ROUTES: {}, IMAGEGEN_PROVIDER: 'recraft' })).toEqual(['designer']);
+    expect(cloudAgentsFor({ MODE: 'live', LLM_DEFAULT_PROVIDER: 'ollama', LLM_ROUTES: {}, IMAGEGEN_PROVIDER: 'local' })).toEqual([]);
     expect(cloudAgentsFor({ MODE: 'live', LLM_DEFAULT_PROVIDER: 'ollama', LLM_ROUTES: {} })).toEqual([]);
     expect(cloudAgentsFor({ MODE: 'live', LLM_DEFAULT_PROVIDER: 'ollama', LLM_ROUTES: { compliance_guard: 'anthropic' } })).toEqual(['compliance_guard']);
     expect(cloudAgentsFor({ MODE: 'live', LLM_DEFAULT_PROVIDER: 'anthropic', LLM_ROUTES: { designer: 'ollama' } })).not.toContain('designer');
@@ -139,6 +170,67 @@ describe('runOnce gates', () => {
     const r = await new Orchestrator(h.deps, { cloudAgents: [] }).runOnce();
     expect(r.status === 'ran' && r.job.attempts).toBe(2);
     expect(await auditActions(db)).toContain('job.stale_recovered');
+  });
+});
+
+describe('QA redesign loop', () => {
+  it('returns the product to designed after each QA failure and blocks it after SHOP.caps.maxQaRedesigns redesigns', async () => {
+    const h = await harness({ qa: () => 'qa_failed' });
+    const orch = new Orchestrator(h.deps, { cloudAgents: [], qaPublish: { sleep: async () => {} } });
+    const desk = createDeskService(h.deps);
+    const max = h.deps.shop.caps.maxQaRedesigns;
+    expect(max).toBe(2);
+    const id = await seedProduct(db, h.clock.now(), { state: 'designed', withDesign: true, editedKey: null });
+
+    for (let round = 0; round <= max; round++) {
+      await desk.uploadEditedDesign(id, { bytes: await makePng(60, 72), filename: 'fix.png', mimeType: 'image/png' }, 'razvan');
+      await orch.runUntilIdle(); // write -> final_check -> qa_publish (fails)
+      const st = await productState(db, id);
+      if (round < max) {
+        expect(st).toMatchObject({ state: 'designed', attempt: round + 1 });
+        expect((await desk.listProducts({ states: ['designed'] }))[0]).toMatchObject({ id, needsAction: true });
+      } else {
+        expect(st.state).toBe('blocked');
+        expect(st.attempt).toBe(max);
+        expect(st.blockReason).toMatch(/^QA failed after 2 redesign\(s\): Too many semi-transparent pixels/);
+      }
+    }
+
+    // One QA run per upload; each redesign got its own upload, listing rewrite and checks (fresh idempotency keys).
+    expect(h.agents.calls.filter((c) => c.agent === 'qaPublisher')).toHaveLength(max + 1);
+    const keys = (await jobsOf(db, { productId: id })).map((j) => j.idempotency_key);
+    for (let a = 0; a <= max; a++) {
+      for (const kind of ['write', 'final_check', 'qa_publish'] as const) expect(keys).toContain(productStepKey(kind, id, a));
+    }
+    expect((await jobsOf(db, { productId: id })).every((j) => j.status === 'done')).toBe(true);
+    const actions = await auditActions(db, id);
+    expect(actions.filter((a) => a === 'design.upload')).toHaveLength(max + 1);
+    expect(actions.filter((a) => a === 'product.qa_failed')).toHaveLength(max + 1);
+    expect(actions.filter((a) => a === 'product.blocked')).toHaveLength(1);
+    const events = await db.query<{ event: string }>('SELECT event FROM product_events WHERE product_id = $1 AND event LIKE $2', [id, 'qa_%']);
+    expect(events.rows.map((r) => r.event).sort()).toEqual(['qa_fail', 'qa_fail', 'qa_fail_final']);
+    expect(h.integrations.fakes.storage.blobs.has(`designs/${id}/edited-${max + 1}.png`)).toBe(true);
+
+    // Blocked is terminal: no more uploads, no more jobs.
+    await expect(
+      desk.uploadEditedDesign(id, { bytes: await makePng(), filename: 'again.png', mimeType: 'image/png' }, 'razvan'),
+    ).rejects.toThrow(/only while the product waits/);
+    expect((await orch.runOnce()).status).toBe('idle');
+  });
+
+  it('a redesign that passes QA becomes a draft', async () => {
+    const h = await harness({ qa: (_i, call) => (call === 0 ? 'qa_failed' : 'drafted') });
+    const orch = new Orchestrator(h.deps, { cloudAgents: [], qaPublish: { sleep: async () => {} } });
+    const desk = createDeskService(h.deps);
+    const id = await seedProduct(db, h.clock.now(), { state: 'designed', withDesign: true, editedKey: null });
+    await desk.uploadEditedDesign(id, { bytes: await makePng(), filename: 'a.png', mimeType: 'image/png' }, 'razvan');
+    await orch.runUntilIdle();
+    expect(await productState(db, id)).toMatchObject({ state: 'designed', attempt: 1 });
+    await desk.uploadEditedDesign(id, { bytes: await makePng(), filename: 'b.png', mimeType: 'image/png' }, 'razvan');
+    await orch.runUntilIdle();
+    expect(await productState(db, id)).toMatchObject({ state: 'drafted', attempt: 1 });
+    const qaInputs = h.agents.calls.filter((c) => c.agent === 'qaPublisher').map((c) => (c.input as { editedKey: string }).editedKey);
+    expect(qaInputs).toEqual([`designs/${id}/edited-1.png`, `designs/${id}/edited-2.png`]);
   });
 });
 

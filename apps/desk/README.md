@@ -20,7 +20,8 @@ database or external APIs directly.
 
 Read at request time through `loadEnv` (never at build time):
 
-- `DESK_PASSWORD_HASH`: `scrypt$N$r$p$saltB64$hashB64`, made with `npm run worker -- hash-password` (worker CLI).
+- `DESK_PASSWORD_HASH`: `scrypt$N$r$p$saltB64$hashB64`, made with `./deploy/compose.sh run --rm --no-deps worker hash-password`
+  (or `npx tsx apps/worker/src/cli.ts hash-password` from the repo root; not `npm run worker`, which starts the worker loop).
 - `DESK_SESSION_SECRET`: at least 32 random characters, e.g. `openssl rand -base64 48`. Rotating it signs everyone out.
 - `DESK_ORIGIN`: the exact HTTPS origin you open in the browser, e.g. `https://secforit-home.<tailnet>.ts.net`.
   Every POST (all server actions) must carry this `Origin`; without it, production refuses every change.
@@ -29,6 +30,8 @@ Read at request time through `loadEnv` (never at build time):
 ## Security
 
 - Session: `__Host-desk_session` cookie, HMAC-SHA256 over issued-at + random nonce, 12 h, `HttpOnly; Secure; SameSite=Strict`.
+  Sign out revokes every session issued until then (all devices) for the life of the process; rotating
+  `DESK_SESSION_SECRET` is the durable "sign out everywhere".
 - `proxy.ts` (Next 16's middleware) runs on every request except `/_next/static`: origin check on mutations,
   session check on everything but `/login` and `/healthz`, per-request CSP nonce (`strict-dynamic`, no `unsafe-eval`).
   Pages, server actions and the asset route re-check the session themselves.
@@ -36,6 +39,12 @@ Read at request time through `loadEnv` (never at build time):
   (not `no-referrer`, which would make browsers send `Origin: null`), `X-Content-Type-Options: nosniff`,
   `Permissions-Policy`, HSTS.
 - Uploads: PNG only, 50 MB (server action body limit `50mb`); the service re-validates and re-encodes with sharp.
+- Image downloads (`/products/<id>/asset/<kind>`) are served `private, no-store` under
+  `default-src 'none'; sandbox`, only after the session check.
+- `loadEnv` reads every `FOO_FILE` variable into `FOO`. The desk passes it only the `*_FILE` variables that
+  target core keys (`lib/envScope.ts`), so unrelated `*_FILE` variables from the base image or the shared `.env`
+  (e.g. `SSL_CERT_FILE`, or the worker's old `WORKER_HEARTBEAT_FILE`, now `WORKER_HEARTBEAT_PATH`) cannot make
+  the desk configuration invalid.
 
 ## Develop and check
 
@@ -47,6 +56,9 @@ cd apps/desk && npx tsc --noEmit && MODE=mock npx next build
 ```
 
 `DESK_FAKE=1` only works under `next dev`: production builds inline `NODE_ENV=production` and drop the fake.
+Without `DESK_ORIGIN`, `next dev` accepts mutations only from `http://localhost:3000` and `http://127.0.0.1:3000`;
+set `DESK_ORIGIN` when you use another port. After a successful upload, approval or rejection the product page
+shows a fixed confirmation (`?done=uploaded|approved|rejected`).
 
 ## Container
 

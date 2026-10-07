@@ -1,6 +1,6 @@
 /**
  * createLlm(env, { gpu }):
- *  - MODE=mock -> MockLlm (deterministic, offline).
+ *  - MODE=mock -> MockLlm (deterministic, offline; calls still go through gpu.withGpu('llm', ...)).
  *  - MODE=live -> RoutedLlm: per agent, env.LLM_ROUTES[agent] ?? env.LLM_DEFAULT_PROVIDER picks
  *    OllamaLlm (local GPU, default; every call inside gpu.withGpu('llm', ...)) or AnthropicLlm (optional cloud).
  * Optional extras (all backwards compatible): logger, fetch (tests), prices (else LLM_PRICES_JSON from process env).
@@ -25,7 +25,7 @@ export interface CreateLlmOptions {
 }
 
 export function createLlm(env: Env, opts: CreateLlmOptions): LlmClient {
-  if (env.MODE === 'mock') return new MockLlm();
+  if (env.MODE === 'mock') return new MockLlm(opts.gpu);
   const logger = opts.logger ?? silentLogger;
 
   const routes = env.LLM_ROUTES as Record<string, LlmProvider>;

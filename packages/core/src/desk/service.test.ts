@@ -119,6 +119,37 @@ describe('approve / reject', () => {
     await expect(desk.approve(id, 'razvan')).rejects.toThrow(/Etsy did not accept/);
     expect((await productState(db, id)).state).toBe('drafted');
     expect(await auditActions(db, String(etsyId))).toEqual(['etsy.listing.activate_failed']);
+    const approvals = await db.query('SELECT 1 FROM approvals WHERE product_id = $1', [id]);
+    expect(approvals.rows).toHaveLength(0);
+
+    // Etsy recovers: the retry goes through.
+    h.integrations.fakes.etsy.failUpdates = false;
+    h.clock.advance(60_000);
+    await desk.approve(id, 'razvan');
+    expect((await productState(db, id)).state).toBe('live');
+    expect(await auditActions(db, String(etsyId))).toEqual(['etsy.listing.activate_failed', 'etsy.listing.activate']);
+  });
+
+  it('approve holds the product while Etsy is called, so a concurrent reject cannot leave a live listing on a rejected product', async () => {
+    const { id, etsyId } = await draftedProduct();
+    const etsy = h.integrations.fakes.etsy;
+    const original = etsy.updateListing.bind(etsy);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    etsy.updateListing = async (listingId, patch) => {
+      await gate;
+      return original(listingId, patch);
+    };
+    const approving = desk.approve(id, 'razvan');
+    await new Promise((r) => setTimeout(r, 25));
+    const rejecting = desk.reject(id, 'Changed my mind', 'razvan');
+    release();
+    await approving;
+    await expect(rejecting).rejects.toBeInstanceOf(DeskError);
+    expect((await productState(db, id)).state).toBe('live');
+    expect(etsy.listings.get(etsyId)!.state).toBe('active');
+    expect(await latestAvoidRules(db)).toEqual([]);
+    expect(await auditActions(db, id)).toEqual(['product.approve']);
   });
 
   it('approve refuses wrong states and drafts without an Etsy listing', async () => {

@@ -13,3 +13,10 @@ export * from './agents/contracts.ts';
 export * from './desk/contracts.ts';
 
 // --- builder exports below (one line per module) ---
+export * from './integrations/index.ts';
+export * from './llm/index.ts';
+export * from './agents/index.ts';
+export * from './orchestrator/index.ts';
+export * from './desk/service.ts';
+export * from './desk/password.ts';
+export * from './desk/upload.ts';

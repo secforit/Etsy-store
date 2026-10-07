@@ -95,10 +95,34 @@ export class MemoryStorage implements BlobStorage {
 
 export class FakeTrademark implements TrademarkClient {
   readonly searched: string[] = [];
+  /** Same order as `searched`: false when the caller asked for an exact-only query. */
+  readonly prefixes: boolean[] = [];
   constructor(private readonly lookup: (term: string) => TrademarkHit[] = () => []) {}
-  async search(term: string) {
+  async search(term: string, opts: { prefix?: boolean } = {}) {
     this.searched.push(term);
+    this.prefixes.push(opts.prefix !== false);
     return this.lookup(term);
+  }
+}
+
+/**
+ * Behaves like the Marker API: returns a mark only when it EQUALS the query, or STARTS WITH it when the prefix
+ * (`term*`) query is on. Never returns a mark that sits inside a longer query.
+ */
+export class MarkerLikeTrademark implements TrademarkClient {
+  readonly queries: { term: string; prefix: boolean }[] = [];
+  constructor(private readonly marks: TrademarkHit[]) {}
+  private static norm(s: string): string {
+    return s.toLowerCase().replace(/[^\p{L}\p{N}\s&'-]+/gu, ' ').replace(/\s+/g, ' ').trim();
+  }
+  async search(term: string, opts: { prefix?: boolean } = {}) {
+    const t = MarkerLikeTrademark.norm(term);
+    const prefix = opts.prefix !== false;
+    this.queries.push({ term: t, prefix });
+    return this.marks.filter((m) => {
+      const n = MarkerLikeTrademark.norm(m.mark);
+      return n === t || (prefix && n.startsWith(t));
+    });
   }
 }
 

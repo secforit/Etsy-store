@@ -151,11 +151,13 @@ describe('MockPrintifyClient', () => {
 });
 
 describe('MockTrademarkClient', () => {
-  it('finds exact, prefix (wildcard) and contained marks; dead marks are returned too', async () => {
+  it('matches like Marker: exact and prefix (wildcard) only; dead marks are returned too', async () => {
     const tm = new MockTrademarkClient();
     expect((await tm.search('Just Do It')).map((h) => h.mark)).toEqual(['JUST DO IT']);
     expect((await tm.search('star')).map((h) => h.mark)).toEqual(['STAR WARS', 'STARBUCKS']);
-    expect((await tm.search('funny nike shirt')).map((h) => h.mark)).toEqual(['NIKE']);
+    expect(await tm.search('star', { prefix: false })).toEqual([]);
+    // Like the real API, a mark INSIDE a longer term is not returned (the compliance guard searches sub-phrases).
+    expect(await tm.search('funny nike shirt')).toEqual([]);
     expect(await tm.search('dog mom')).toEqual([{ mark: 'DOG MOM', serial: '88000014', status: 'dead', classes: [25], owner: null }]);
     expect(await tm.search('retro frog mushroom')).toEqual([]);
     expect(tm.searches).toContain('just do it');

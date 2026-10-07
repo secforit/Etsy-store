@@ -8,13 +8,15 @@
 import { randomBytes } from 'node:crypto';
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { SESSION_COOKIE_NAME, verifySession } from './lib/auth.ts';
+import { SESSION_COOKIE_NAME, SESSION_MAX_AGE_MS, sessionsNotBeforeMs, verifySession } from './lib/auth.ts';
 import { tryGetDeskConfig } from './lib/config.ts';
 import { buildCsp } from './lib/csp.ts';
 import { log } from './lib/log.ts';
 import { checkOrigin, isMutationMethod } from './lib/origin.ts';
 
 const PUBLIC_PATHS = new Set(['/login', '/healthz']);
+/** Image downloads set their own stricter policy (`default-src 'none'; sandbox`); no page nonce needed there. */
+const ASSET_PATH_RE = /^\/products\/[^/]+\/asset\/[^/]+$/;
 
 function plain(status: number, body: string): NextResponse {
   return new NextResponse(body, {
@@ -42,7 +44,13 @@ export function proxy(req: NextRequest): NextResponse {
   }
 
   if (!PUBLIC_PATHS.has(pathname)) {
-    const session = verifySession(req.cookies.get(SESSION_COOKIE_NAME)?.value, cfg.sessionSecret, Date.now());
+    const session = verifySession(
+      req.cookies.get(SESSION_COOKIE_NAME)?.value,
+      cfg.sessionSecret,
+      Date.now(),
+      SESSION_MAX_AGE_MS,
+      sessionsNotBeforeMs(),
+    );
     if (!session) {
       if (req.method === 'GET' || req.method === 'HEAD') {
         const login = new URL('/login', cfg.deskOrigin ?? req.nextUrl.origin);
@@ -52,6 +60,8 @@ export function proxy(req: NextRequest): NextResponse {
       return plain(401, 'Unauthorized');
     }
   }
+
+  if (ASSET_PATH_RE.test(pathname)) return NextResponse.next();
 
   const nonce = randomBytes(16).toString('base64');
   const csp = buildCsp(nonce, { isDev: process.env.NODE_ENV !== 'production' });
@@ -69,7 +79,7 @@ export function proxy(req: NextRequest): NextResponse {
 }
 
 export const config = {
-  // Everything except build assets and the two static files at the root. (The image optimizer is
-  // disabled in next.config and deliberately NOT excluded here.)
-  matcher: ['/((?!_next/static/|favicon\\.ico$|robots\\.txt$).*)'],
+  // Everything except build assets and the public static files at the root (robots.txt, the app icon).
+  // (The image optimizer is disabled in next.config and deliberately NOT excluded here.)
+  matcher: ['/((?!_next/static/|favicon\\.ico$|robots\\.txt$|icon\\.svg$).*)'],
 };

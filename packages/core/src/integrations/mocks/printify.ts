@@ -5,6 +5,7 @@
  */
 import type { ProductType } from '../../domain/types.ts';
 import { HttpError } from '../http.ts';
+import type { ExternalWriteEvent, ExternalWriteHook } from '../printify.ts';
 import type { PrintifyCatalogEntry, PrintifyClient, PrintifyProduct, PrintifyProductInput } from '../types.ts';
 import { fromBase64, hash32, roundCents, sha256Hex } from '../util.ts';
 import type { MockEtsyClient } from './etsy.ts';
@@ -66,6 +67,8 @@ export interface MockPrintifyOptions {
   publishPolls?: number;
   /** Converts the USD variant price back to the EUR listing price for the mock Etsy draft. */
   eurToUsd?: number;
+  /** Same hook as LivePrintifyClient: reports upload/create/publish so mock runs exercise the audit_log wiring. */
+  onExternalWrite?: ExternalWriteHook;
 }
 
 function notFound(operation: string): HttpError {
@@ -81,6 +84,15 @@ export class MockPrintifyClient implements PrintifyClient {
 
   constructor(private readonly opts: MockPrintifyOptions = {}) {}
 
+  private async emit(e: Omit<ExternalWriteEvent, 'service'>): Promise<void> {
+    if (!this.opts.onExternalWrite) return;
+    try {
+      await this.opts.onExternalWrite({ service: 'printify', ...e });
+    } catch {
+      // Like the live client: a failing audit hook never fails the write itself.
+    }
+  }
+
   async getCatalogEntry(productType: ProductType): Promise<PrintifyCatalogEntry> {
     const e = MOCK_PRINTIFY_CATALOG[productType];
     if (!e) throw new Error(`printify mock: unknown product type ${String(productType)}`);
@@ -93,6 +105,7 @@ export class MockPrintifyClient implements PrintifyClient {
     const id = sha256Hex(bytes).slice(0, 24);
     this.uploads.set(id, bytes.byteLength);
     this.calls.push({ op: 'upload', id });
+    await this.emit({ action: 'printify.image.upload', entity: 'printify_image', entityId: id, details: { fileName: input.fileName } });
     return { id };
   }
 
@@ -111,6 +124,12 @@ export class MockPrintifyClient implements PrintifyClient {
     const id = sha256Hex(`product:${this.counter}:${input.title}`).slice(0, 24);
     this.products.set(id, { input: structuredClone(input), external: null, pendingPolls: 0, isLocked: false });
     this.calls.push({ op: 'create', id });
+    await this.emit({
+      action: 'printify.product.create',
+      entity: 'printify_product',
+      entityId: id,
+      details: { blueprintId: input.blueprintId, printProviderId: input.printProviderId, variants: input.variants.length },
+    });
     return { id };
   }
 
@@ -153,6 +172,7 @@ export class MockPrintifyClient implements PrintifyClient {
     p.external = { id: String(listingId), handle: `https://www.etsy.com/listing/${listingId}` };
     p.pendingPolls = this.opts.publishPolls ?? 0;
     p.isLocked = true;
+    await this.emit({ action: 'printify.product.publish', entity: 'printify_product', entityId: productId, details: {} });
   }
 
   private mockups(productId: string, p: StoredProduct): string[] {

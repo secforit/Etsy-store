@@ -79,12 +79,17 @@ describe('AnthropicLlm', () => {
     expect(res.usage.durationMs).toBe(100);
   });
 
-  it('counts unknown models as cost 0 and warns once', async () => {
+  it('bills unknown models at the conservative fallback rate (never $0) and warns once', async () => {
     const { llm, warnings } = setup([toolReply({ answer: 'hello' }), toolReply({ answer: 'again' })], {} as never);
     const a = await llm.generate(req);
     await llm.generate(req);
-    expect(a.usage.costUsd).toBe(0);
+    expect(a.usage.costUsd).toBeCloseTo(0.03, 6); // 1000*15/1e6 + 200*75/1e6
     expect(warnings).toHaveLength(1);
+  });
+
+  it('uses the table maximum as the fallback when the table has a dearer model', async () => {
+    const { llm } = setup([toolReply({ answer: 'hello' })], { 'some-other-model': { inputPerMTokUsd: 30, outputPerMTokUsd: 150 } } as never);
+    expect((await llm.generate(req)).usage.costUsd).toBeCloseTo(0.06, 6); // 1000*30/1e6 + 200*150/1e6
   });
 
   it('sends a repair turn as an error tool_result, then succeeds', async () => {

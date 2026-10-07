@@ -1,19 +1,23 @@
 import { describe, expect, it } from 'vitest';
 import type { ComplianceGuardInput } from './contracts.ts';
-import { runComplianceGuard } from './complianceGuard.ts';
+import { MAX_TRADEMARK_SEARCHES, distinctiveWords, runComplianceGuard, trademarkSearchPlan, wordNgrams } from './complianceGuard.ts';
 import { LlmError } from '../llm/types.ts';
-import { FakeTrademark, MemoryStorage, ScriptedLlm, TODAY, mark, realPng, shop } from './testing/fakes.ts';
+import { FakeTrademark, MarkerLikeTrademark, MemoryStorage, ScriptedLlm, TODAY, mark, realPng, shop } from './testing/fakes.ts';
 import type { TrademarkHit } from '../domain/types.ts';
+import type { TrademarkClient } from '../integrations/types.ts';
 
 const pass = { verdict: 'pass', reasons: [], flaggedTerms: [] };
 
-function deps(opts: { model?: unknown; marks?: (t: string) => TrademarkHit[]; blocklist?: string[]; storage?: MemoryStorage } = {}) {
+function deps(
+  opts: { model?: unknown; marks?: (t: string) => TrademarkHit[]; trademark?: TrademarkClient; blocklist?: string[]; storage?: MemoryStorage } = {},
+) {
   const llm = new ScriptedLlm({ compliance_guard: () => opts.model ?? pass });
   const trademark = new FakeTrademark(opts.marks);
+  const client: TrademarkClient = opts.trademark ?? trademark;
   return {
     llm,
     trademark,
-    d: { llm, shop, today: TODAY, trademark, storage: opts.storage ?? new MemoryStorage(), blocklist: opts.blocklist ?? [] },
+    d: { llm, shop, today: TODAY, trademark: client, storage: opts.storage ?? new MemoryStorage(), blocklist: opts.blocklist ?? [] },
   };
 }
 
@@ -64,7 +68,41 @@ describe('Compliance Guard blocklist (code hard rule)', () => {
     expect(output.verdict).toBe('pass');
     expect(output.blocklistHits).toEqual([]);
     expect(llmUsage).toHaveLength(1);
-    expect(trademark.searched).toEqual(['Campfire Club', 'Retro Campfire Badge', 'camping shirt', 'campfire gift']);
+    // Whole phrases (exact + prefix), then the concept title's sub-phrases (exact only).
+    expect(trademark.searched).toEqual(['Campfire Club', 'Retro Campfire Badge', 'retro campfire', 'campfire badge', 'camping shirt', 'campfire gift']);
+    expect(trademark.prefixes).toEqual([true, true, false, false, true, true]);
+  });
+});
+
+describe('Compliance Guard trademark search plan', () => {
+  it('searches every 2-4 word sub-phrase of the design phrase first, exact only, skipping filler-only ones', () => {
+    const plan = trademarkSearchPlan(concept({ designPhrase: 'Life Is Good At The Lake', conceptTitle: 'Lake Days Tee' }));
+    expect(plan[0]).toEqual({ term: 'Life Is Good At The Lake', prefix: true, kind: 'phrase' });
+    const designGrams = plan.slice(1, 12).map((q) => q.term);
+    expect(designGrams).toContain('life is good');
+    expect(designGrams).toContain('good at the lake');
+    expect(designGrams).not.toContain('at the'); // only stopwords
+    expect(plan.slice(1, 12).every((q) => q.kind === 'ngram' && !q.prefix)).toBe(true);
+    expect(plan.findIndex((q) => q.term === 'Lake Days Tee')).toBeGreaterThan(plan.findIndex((q) => q.term === 'good at the lake'));
+  });
+
+  it('adds listing title sub-phrases and distinctive single words (evidence only) at the final stage, within the cap', () => {
+    const title = 'Funny Mama Bear Camping Shirt For Moms Who Love Yeti Mugs And Lake Trips Vintage Retro Outdoor Tee';
+    const plan = trademarkSearchPlan(
+      concept({ stage: 'final', listing: { title, tags: ['camping mom', 'mama bear tee'], description: 'x'.repeat(60) } }),
+    );
+    expect(plan.find((q) => q.term === 'mama bear')).toMatchObject({ prefix: false, kind: 'ngram' });
+    expect(plan.find((q) => q.term === 'yeti')).toEqual({ term: 'yeti', prefix: false, kind: 'word' });
+    expect(plan.find((q) => q.term === 'camping mom')).toMatchObject({ prefix: true, kind: 'phrase' });
+    expect(plan.find((q) => q.term === 'shirt for')).toBeUndefined();
+    expect(plan.length).toBeLessThanOrEqual(MAX_TRADEMARK_SEARCHES);
+    expect(new Set(plan.map((q) => q.term.toLowerCase())).size).toBe(plan.length);
+  });
+
+  it('builds sub-phrases from normalised words', () => {
+    expect(wordNgrams('Mama’s  Bear-Club!')).toEqual(['mamas bear', 'bear club', 'mamas bear club']);
+    expect(wordNgrams('T-Shirt Gift')).toEqual([]);
+    expect(distinctiveWords(['Yeti Camping Patagonia Lake 2026'])).toEqual(['yeti', 'patagonia']);
   });
 });
 
@@ -100,9 +138,43 @@ describe('Compliance Guard trademarks (code hard rule)', () => {
     expect((await runComplianceGuard(concept({ productType: 'mug' }), d)).output.verdict).toBe('block');
   });
 
-  it('blocks a multi-word live mark contained in the product text', async () => {
-    const { d } = deps({ marks: (t) => (t === 'camping shirt' ? [mark('RETRO CAMPFIRE', 'live', [25])] : []) });
-    expect((await runComplianceGuard(concept(), d)).output.verdict).toBe('block');
+  it('blocks a multi-word live mark at the start of a longer phrase (Marker-like search)', async () => {
+    const marker = new MarkerLikeTrademark([mark('RETRO CAMPFIRE', 'live', [25])]);
+    const { d } = deps({ trademark: marker });
+    const { output } = await runComplianceGuard(concept(), d);
+    expect(output.verdict).toBe('block');
+    expect(output.flaggedTerms).toContain('RETRO CAMPFIRE');
+    expect(marker.queries).toContainEqual({ term: 'retro campfire', prefix: false });
+  });
+
+  it('blocks a live mark in the middle of the design phrase: "Life Is Good At The Lake" vs LIFE IS GOOD', async () => {
+    const marker = new MarkerLikeTrademark([mark('LIFE IS GOOD', 'live', [25]), mark('LAKE LIFE CO', 'live', [25])]);
+    const { d } = deps({ trademark: marker });
+    const { output } = await runComplianceGuard(concept({ designPhrase: 'Life Is Good At The Lake', conceptTitle: 'Lake Weekend Badge' }), d);
+    expect(output.verdict).toBe('block');
+    expect(output.reasons.join(' ')).toContain('LIFE IS GOOD');
+    expect(output.trademarkHits.map((h) => h.mark)).toEqual(['LIFE IS GOOD']);
+    // The whole-phrase search alone (exact + prefix) could not have found it.
+    const whole = await new MarkerLikeTrademark([mark('LIFE IS GOOD', 'live', [25])]).search('Life Is Good At The Lake');
+    expect(whole).toEqual([]);
+  });
+
+  it('blocks a live mark in the middle of the listing title at the final stage', async () => {
+    const { d } = deps({ trademark: new MarkerLikeTrademark([mark('MAMA BEAR', 'live', [25])]) });
+    const listing = { title: 'Funny Mama Bear Camping Shirt For Moms', tags: ['camping mom'], description: 'Nice design for campers. '.repeat(3) };
+    const { output } = await runComplianceGuard(concept({ stage: 'final', listing }), d);
+    expect(output.verdict).toBe('block');
+    expect(output.flaggedTerms).toContain('MAMA BEAR');
+  });
+
+  it('shows a distinctive single-word mark to the model without blocking by code', async () => {
+    const marker = new MarkerLikeTrademark([mark('YETI', 'live', [21])]);
+    const { d, llm } = deps({ trademark: marker });
+    const { output } = await runComplianceGuard(concept({ productType: 'mug', designPhrase: 'Yeti Season' }), d);
+    expect(marker.queries).toContainEqual({ term: 'yeti', prefix: false });
+    expect(output.verdict).toBe('pass'); // the scripted model passes; code does not block single-word marks inside phrases
+    const data = llm.last('compliance_guard')?.untrustedData as { trademarkEvidence: { mark: string; inProductClass: boolean }[] };
+    expect(data.trademarkEvidence).toContainEqual(expect.objectContaining({ mark: 'YETI', inProductClass: true, matchesProductWords: false }));
   });
 
   it('leaves a single common word mark contained in a longer phrase to the model', async () => {

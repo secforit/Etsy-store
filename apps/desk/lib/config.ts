@@ -5,6 +5,7 @@
 import { loadEnv } from '@etsy-agents/core/config/env.ts';
 import type { Env } from '@etsy-agents/core/config/env.ts';
 import { MIN_SESSION_SECRET_LENGTH, parsePasswordHash } from './auth.ts';
+import { scopeEnvForLoad } from './envScope.ts';
 import { log } from './log.ts';
 import { allowedOrigins, normalizeOrigin } from './origin.ts';
 
@@ -28,7 +29,7 @@ function isProduction(): boolean {
 }
 
 function build(): DeskConfig {
-  const env = loadEnv(process.env);
+  const env = loadEnv(scopeEnvForLoad(process.env));
   const deskOrigin = normalizeOrigin(env.DESK_ORIGIN);
   let passwordHash: string | null = env.DESK_PASSWORD_HASH ?? null;
   if (passwordHash && !parsePasswordHash(passwordHash)) {

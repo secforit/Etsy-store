@@ -16,6 +16,7 @@ import { loadEnv, type Env } from '@etsy-agents/core/config/env.ts';
 import { migrate } from '@etsy-agents/core/db/db.ts';
 import type { ProductType } from '@etsy-agents/core/domain/types.ts';
 import { cloudAgentsFor } from '@etsy-agents/core/orchestrator/caps.ts';
+import { scopeEnvForLoad } from '@etsy-agents/core/orchestrator/config.ts';
 import { createLogger, errorMessage } from '@etsy-agents/core/orchestrator/logger.ts';
 import { Orchestrator } from '@etsy-agents/core/orchestrator/orchestrator.ts';
 import { buildRuntime, openDb } from '@etsy-agents/core/orchestrator/runtime.ts';
@@ -50,7 +51,7 @@ export interface CliContext {
 export async function main(argv: readonly string[], ctx: CliContext = { io: consoleIo }): Promise<number> {
   const { io } = ctx;
   const args = parseArgs(argv, ['dry-run', 'help']);
-  const getEnv = () => ctx.env ?? loadEnv(ctx.rawEnv ?? process.env);
+  const getEnv = () => ctx.env ?? loadEnv(scopeEnvForLoad(ctx.rawEnv ?? process.env));
   switch (args.command) {
     case 'migrate': {
       const env = getEnv();
@@ -76,7 +77,7 @@ export async function main(argv: readonly string[], ctx: CliContext = { io: cons
       };
       process.once('SIGTERM', () => stop('SIGTERM'));
       process.once('SIGINT', () => stop('SIGINT'));
-      const stopHeartbeat = startHeartbeat(settings.WORKER_HEARTBEAT_FILE, deps.logger);
+      const stopHeartbeat = startHeartbeat(settings.WORKER_HEARTBEAT_PATH, deps.logger);
       deps.logger.info(
         { mode: env.MODE, llm: env.LLM_DEFAULT_PROVIDER, routes: Object.keys(env.LLM_ROUTES), imagegen: env.IMAGEGEN_PROVIDER },
         'worker started',

@@ -5,9 +5,12 @@
  *     then exact resize with imageTools.toPrintFile. Needs more than 4x -> qa_failed.
  *  3. Inspect the print file: size, DPI, sRGB, alpha (tshirt/mug), semi-transparent share.
  *  4. Printify, idempotent: reuse input.existingPrintifyProductId when set (already published -> done;
- *     publishing -> wait), else upload + create with per-variant min-margin prices.
+ *     publishing -> wait), else upload + create with per-variant min-margin prices. A new product's id is handed
+ *     to deps.onPrintifyProductCreated at once, so a run that dies later never leads to a duplicate product.
  *  5. Vision check of up to 3 Printify mockups (fetched with the SSRF-safe deps.fetchImage) BEFORE publishing,
- *     so a failed check never leaves an Etsy draft behind.
+ *     so a failed check never leaves an Etsy draft behind. Nothing is published unless the model looked at
+ *     least at one mockup: no mockup yet -> retry later (PrintifyProductPendingError), or qa_failed on the
+ *     job's final attempt.
  *  6. Publish, then poll getProduct (bounded) until external.id is set -> drafted.
  * Any failure after a Printify product exists is rethrown as PrintifyProductPendingError carrying the id,
  * so the orchestrator can store it and the retry reuses the product instead of creating a duplicate.
@@ -34,6 +37,7 @@ export const QaVisionModelSchema = z.object({
 export const MAX_SEMI_TRANSPARENT_SHARE = 0.1;
 export const MAX_ASPECT_MISMATCH = 0.05;
 export const MAX_MOCKUPS_CHECKED = 3;
+export const DEFAULT_MOCKUP_LOAD_ATTEMPTS = 3;
 export const DEFAULT_PUBLISH_POLL_ATTEMPTS = 20;
 export const DEFAULT_PUBLISH_POLL_INTERVAL_MS = 6000;
 export const DEFAULT_PRINT_DPI = 300;
@@ -158,6 +162,7 @@ export const runQaPublisher: RunQaPublisher = async (input, baseDeps) => {
 
   // 4. Printify product: reuse or create.
   let productId: string;
+  let createdNow = false;
   if (input.existingPrintifyProductId) {
     productId = input.existingPrintifyProductId;
     notes.push('Reused the existing Printify product (no duplicate created).');
@@ -182,9 +187,12 @@ export const runQaPublisher: RunQaPublisher = async (input, baseDeps) => {
       printPosition: catalog.printArea.position,
     });
     productId = created.id;
+    createdNow = true;
   }
 
   try {
+    // Persist the new id before anything else (publish, polling, the vision call) can fail or be cut short.
+    if (createdNow && deps.onPrintifyProductCreated) await deps.onPrintifyProductCreated(productId);
     let product: PrintifyProduct = await deps.printify.getProduct(productId);
     if (!product.external?.id) {
       if (product.isLocked) {
@@ -218,19 +226,43 @@ export const runQaPublisher: RunQaPublisher = async (input, baseDeps) => {
     });
   }
 
-  async function visionCheck(product: PrintifyProduct): Promise<string[] | null> {
+  async function loadMockups(product: PrintifyProduct): Promise<{ images: LlmImage[]; errors: string[] }> {
     const images: LlmImage[] = [];
+    const errors: string[] = [];
     for (const url of product.mockupUrls.slice(0, MAX_MOCKUPS_CHECKED)) {
       try {
         const img = await deps.fetchImage(url);
         images.push(await toVisionImage(img.bytes, 768));
       } catch (err) {
-        notes.push(`A mockup could not be loaded for the vision check (${clip((err as Error)?.message ?? 'error', 120)}).`);
+        errors.push(clip((err as Error)?.message ?? 'error', 120));
       }
     }
+    return { images, errors };
+  }
+
+  /**
+   * Issues (-> qa_failed) or null (passed). Fails closed: publishing happens only after the model has looked at
+   * least at one mockup. Printify renders mockups shortly after create, so a few in-run retries come first.
+   */
+  async function visionCheck(first: PrintifyProduct): Promise<string[] | null> {
+    let product = first;
+    let { images, errors } = await loadMockups(product);
+    const tries = Math.max(1, deps.mockupLoadAttempts ?? DEFAULT_MOCKUP_LOAD_ATTEMPTS);
+    for (let i = 1; i < tries && images.length === 0; i++) {
+      await sleep(pollIntervalMs);
+      product = await deps.printify.getProduct(productId);
+      ({ images, errors } = await loadMockups(product));
+    }
+    for (const e of errors) notes.push(`A mockup could not be loaded for the vision check (${e}).`);
     if (images.length === 0) {
-      notes.push('No mockup images were available; the vision check was skipped.');
-      return null;
+      const why =
+        product.mockupUrls.length === 0 ? 'Printify has not generated mockup images yet' : 'none of the mockup images could be loaded';
+      if (deps.finalAttempt) {
+        return [
+          `The mockup check could not run (${why}), so the product was not published. Check the mockups of this product in Printify, then upload the design again.`,
+        ];
+      }
+      throw new PrintifyProductPendingError(productId, `Vision check not possible yet (${why}); not publishing, will retry`);
     }
     const verdict = await askModel(
       deps.llm,

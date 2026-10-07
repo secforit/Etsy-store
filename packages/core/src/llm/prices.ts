@@ -1,7 +1,9 @@
 /**
  * Cloud model price table (USD per million tokens), read from env `LLM_PRICES_JSON`, e.g.
  *   LLM_PRICES_JSON={"<anthropic-model-id>":{"inputPerMTokUsd":3,"outputPerMTokUsd":15}}
- * Local Ollama calls always cost 0. Unknown cloud models cost 0 and log a warning.
+ * Local Ollama calls always cost 0. The worker and desk refuse to start in live mode when a configured cloud model
+ * has no price (orchestrator/runtime.ts); if an unknown model is billed anyway, it is billed at
+ * UNKNOWN_MODEL_PRICE (fail closed), never at $0, so the daily spend cap still trips.
  * Note: config/env.ts (a contract file) has no LLM_PRICES_JSON key, so it is read from the raw process env here.
  */
 import { z } from 'zod';
@@ -12,6 +14,23 @@ const PriceSchema = z.object({
 });
 export type LlmPrice = z.infer<typeof PriceSchema>;
 export type LlmPriceTable = Record<string, LlmPrice>;
+
+/**
+ * Conservative rate for a cloud model missing from the table: the highest Claude list price so far (Opus 4 /
+ * 4.1: $15 in, $75 out per million tokens), or the table's highest rate if that is higher. Over-counting spend
+ * only pauses cloud jobs early; under-counting would let them run past the cap.
+ */
+export const UNKNOWN_MODEL_PRICE: LlmPrice = { inputPerMTokUsd: 15, outputPerMTokUsd: 75 };
+
+export function fallbackPrice(table: LlmPriceTable): LlmPrice {
+  let input = UNKNOWN_MODEL_PRICE.inputPerMTokUsd;
+  let output = UNKNOWN_MODEL_PRICE.outputPerMTokUsd;
+  for (const p of Object.values(table)) {
+    input = Math.max(input, p.inputPerMTokUsd);
+    output = Math.max(output, p.outputPerMTokUsd);
+  }
+  return { inputPerMTokUsd: input, outputPerMTokUsd: output };
+}
 
 const TableSchema = z.record(z.string().min(1), PriceSchema);
 

@@ -2,14 +2,14 @@
  * Content-Security-Policy builder. Never includes 'unsafe-eval' outside `next dev`
  * (React's dev tooling needs it; production React/Next do not).
  *
- * - With a nonce (set per request by proxy.ts): strict nonce + 'strict-dynamic' policy.
- * - Without a nonce (static header in next.config for responses the proxy does not touch): 'self'
- *   only, plus 'unsafe-inline' for scripts/styles because no nonce exists there.
+ * - With a nonce (set per request by proxy.ts, which handles every page): strict nonce + 'strict-dynamic'.
+ * - Without a nonce (static header in next.config): 'self' only. It covers what the proxy does not touch
+ *   (build assets, robots.txt) and redirects/plain-text refusals, none of which carry inline script.
  */
 export function buildCsp(nonce: string | null, opts: { isDev: boolean }): string {
   const evalSrc = opts.isDev ? " 'unsafe-eval'" : '';
-  const scriptSrc = nonce ? `'self' 'nonce-${nonce}' 'strict-dynamic'${evalSrc}` : `'self' 'unsafe-inline'${evalSrc}`;
-  const styleSrc = nonce ? `'self' 'nonce-${nonce}'` : `'self' 'unsafe-inline'`;
+  const scriptSrc = nonce ? `'self' 'nonce-${nonce}' 'strict-dynamic'${evalSrc}` : `'self'${evalSrc}`;
+  const styleSrc = nonce ? `'self' 'nonce-${nonce}'` : `'self'`;
   const directives = [
     "default-src 'self'",
     `script-src ${scriptSrc}`,
@@ -29,3 +29,6 @@ export function buildCsp(nonce: string | null, opts: { isDev: boolean }): string
   if (!opts.isDev) directives.push('upgrade-insecure-requests');
   return directives.join('; ');
 }
+
+/** Policy for authenticated image downloads: nothing may load or run, even if a file were opened as a document. */
+export const ASSET_CSP = "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'; sandbox";

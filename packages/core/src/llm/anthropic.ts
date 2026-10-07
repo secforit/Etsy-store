@@ -7,7 +7,7 @@
  */
 import type Anthropic from '@anthropic-ai/sdk';
 import { LlmOutputError, silentLogger, type LlmLogger } from './errors.ts';
-import { costUsd, type LlmPriceTable } from './prices.ts';
+import { costUsd, fallbackPrice, type LlmPriceTable } from './prices.ts';
 import { buildSystemPrompt, buildUserPrompt, repairInstruction, toModelJsonSchema, truncate, validateValue } from './prompt.ts';
 import { LlmError, type LlmClient, type LlmRequest, type LlmResponse, type LlmUsage } from './types.ts';
 
@@ -114,11 +114,16 @@ export class AnthropicLlm implements LlmClient {
   private cost(model: string, inputTokens: number, outputTokens: number): number {
     const price = this.opts.prices[model];
     if (!price) {
+      // Fail closed: an unpriced model is billed at a conservative rate, never $0, so the spend cap still sees it.
+      const fallback = fallbackPrice(this.opts.prices);
       if (!this.warnedModels.has(model)) {
         this.warnedModels.add(model);
-        this.logger.warn({ model }, 'no price for this model in LLM_PRICES_JSON; counting its cost as 0');
+        this.logger.warn(
+          { model, inputPerMTokUsd: fallback.inputPerMTokUsd, outputPerMTokUsd: fallback.outputPerMTokUsd },
+          'no price for this model in LLM_PRICES_JSON; billing it at the conservative fallback rate',
+        );
       }
-      return 0;
+      return costUsd(fallback, inputTokens, outputTokens);
     }
     return costUsd(price, inputTokens, outputTokens);
   }

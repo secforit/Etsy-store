@@ -32,7 +32,10 @@ describe('state machine', () => {
 describe('migrations', () => {
   it('apply cleanly on PGlite and are idempotent', async () => {
     const db = await createPgliteDb();
-    expect(await migrate(db)).toEqual(['001_init.sql']);
+    const ran = await migrate(db);
+    // 001 must run first; later migrations (002_*.sql from the orchestrator) follow in name order.
+    expect(ran[0]).toBe('001_init.sql');
+    expect(ran).toEqual([...ran].sort());
     expect(await migrate(db)).toEqual([]);
     const { rows } = await db.query<{ paused: boolean }>('SELECT paused FROM settings WHERE id = 1');
     expect(rows[0]?.paused).toBe(false);

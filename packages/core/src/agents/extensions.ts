@@ -30,6 +30,20 @@ export type QaPublisherDepsExt = QaPublisherDeps & {
   publishPollAttempts?: number;
   /** Delay between polls. Default 6000 ms. */
   publishPollIntervalMs?: number;
+  /**
+   * Called right after a NEW Printify product is created, before anything else can fail or the process can die
+   * mid-publish: the orchestrator persists the id, so a crashed or retried run reuses the product instead of
+   * creating (and publishing) a duplicate. A failure here is rethrown as PrintifyProductPendingError.
+   */
+  onPrintifyProductCreated?: (printifyProductId: string) => Promise<void>;
+  /**
+   * True on the job's last attempt. The vision check never publishes without looking at a mockup: when no mockup
+   * can be checked, earlier attempts throw PrintifyProductPendingError (retry later, same product) and the last
+   * attempt returns qa_failed.
+   */
+  finalAttempt?: boolean;
+  /** Tries to load mockups inside one run (default 3), publishPollIntervalMs apart. */
+  mockupLoadAttempts?: number;
 };
 
 export type DesignerDepsExt = DesignerDeps & {

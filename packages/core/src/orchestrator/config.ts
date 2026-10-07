@@ -16,11 +16,69 @@ const OrchestratorEnvSchema = z.object({
   TREND_SCAN_HOUR_UTC: z.preprocess(emptyToUndefined, z.coerce.number().int().min(0).max(23).default(4)),
   /** The analyst (LLM report + retirements + follow-ups) runs at most this often; metrics are pulled hourly. */
   ANALYST_REPORT_INTERVAL_HOURS: z.preprocess(emptyToUndefined, z.coerce.number().min(1).max(168).default(24)),
-  /** File the worker touches every loop; the container healthcheck reads its age. */
-  WORKER_HEARTBEAT_FILE: z.preprocess(emptyToUndefined, z.string().min(1).default('/tmp/worker-heartbeat')),
+  /**
+   * File the worker touches every 30 s; the container healthcheck reads its age. (Not named *_FILE on purpose:
+   * loadEnv reads every FOO_FILE variable as a Docker secret file.)
+   */
+  WORKER_HEARTBEAT_PATH: z.preprocess(emptyToUndefined, z.string().min(1).default('/tmp/worker-heartbeat')),
+  /**
+   * Only for the optional cloud image fallback (IMAGEGEN_PROVIDER=recraft): USD charged per generated image
+   * (generation + background removal). Recorded in agent_runs so the daily cloud spend cap sees it.
+   * Local FLUX.2 klein images cost 0. Set it to your Recraft plan's price.
+   */
+  RECRAFT_COST_PER_IMAGE_USD: z.preprocess(emptyToUndefined, z.coerce.number().min(0).max(10).default(0.08)),
 });
 
 export type OrchestratorEnv = z.infer<typeof OrchestratorEnvSchema>;
+
+/** Keys (and key families) defined by config/env.ts. Only these may be filled from a FOO_FILE Docker secret. */
+const CORE_ENV_KEY_RE =
+  /^(?:MODE|LOG_LEVEL|DATABASE_URL|PGLITE_DIR|STORAGE_DIR|(?:LLM|OLLAMA|ANTHROPIC|IMAGEGEN|ETSY|PRINTIFY|MARKER|RECRAFT|IDEOGRAM|PINTEREST|DESK)_[A-Z0-9_]+)$/;
+
+/**
+ * Copy of the environment for loadEnv() without unrelated *_FILE variables. loadEnv reads EVERY FOO_FILE as a
+ * secret file, so a variable such as SSL_CERT_FILE from a base image (or a missing file it names) would make the
+ * whole configuration invalid. Same rule as the desk's lib/envScope.ts.
+ */
+export function scopeEnvForLoad(source: Readonly<Record<string, string | undefined>>): Record<string, string | undefined> {
+  const out: Record<string, string | undefined> = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (key.endsWith('_FILE')) {
+      const target = key.slice(0, -'_FILE'.length);
+      if (!CORE_ENV_KEY_RE.test(target) || target.endsWith('_FILE')) continue;
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+/**
+ * Cloud models whose price is missing from LLM_PRICES_JSON. Unknown models are billed as $0 by the LLM client,
+ * which would let them run past the daily spend cap, so the worker warns about them at start-up.
+ */
+export function cloudModelsWithoutPrice(
+  env: {
+    MODE: 'mock' | 'live';
+    LLM_DEFAULT_PROVIDER: 'ollama' | 'anthropic';
+    LLM_ROUTES: Record<string, 'ollama' | 'anthropic'>;
+    ANTHROPIC_MODEL_LARGE?: string | undefined;
+    ANTHROPIC_MODEL_SMALL?: string | undefined;
+  },
+  raw: Record<string, string | undefined>,
+): string[] {
+  if (env.MODE !== 'live') return [];
+  const usesAnthropic = env.LLM_DEFAULT_PROVIDER === 'anthropic' || Object.values(env.LLM_ROUTES).includes('anthropic');
+  if (!usesAnthropic) return [];
+  let table: Record<string, unknown> = {};
+  try {
+    const parsed: unknown = raw.LLM_PRICES_JSON ? JSON.parse(raw.LLM_PRICES_JSON) : {};
+    if (parsed && typeof parsed === 'object') table = parsed as Record<string, unknown>;
+  } catch {
+    table = {};
+  }
+  const models = [env.ANTHROPIC_MODEL_LARGE, env.ANTHROPIC_MODEL_SMALL].filter((m): m is string => Boolean(m));
+  return [...new Set(models)].filter((m) => !(m in table));
+}
 
 export function loadOrchestratorEnv(source: Record<string, string | undefined> = process.env): OrchestratorEnv {
   const parsed = OrchestratorEnvSchema.safeParse(source);

@@ -208,19 +208,19 @@ export function createDeskService(deps: OrchestratorDeps): DeskService {
       const listing = await getListing(db, product.id);
       if (!listing?.etsyListingId) throw new DeskError('No Etsy draft is linked to this product yet.');
       const etsyListingId = listing.etsyListingId;
-      try {
-        await integrations.etsy.updateListing(etsyListingId, { state: 'active' });
-      } catch (err) {
-        logger.error({ productId: product.id, etsyListingId, err: errorMessage(err) }, 'desk: Etsy activation failed');
-        await insertAudit(
-          db,
-          { actor: who, action: 'etsy.listing.activate_failed', entity: 'etsy_listing', entityId: String(etsyListingId), details: { productId: product.id, error: errorMessage(err, 300) } },
-          deps.now(),
-        );
-        throw new DeskError('Etsy did not accept the activation. Nothing was changed; try again in a minute.');
-      }
+      let etsyError: unknown = null;
       try {
         await db.tx(async (q) => {
+          // Row lock held across the Etsy call: a concurrent reject (or a double click) waits here, so Etsy is
+          // only activated for a product that is still `drafted`, and the DB records exactly what Etsy did.
+          const locked = await getProduct(q, product.id, { forUpdate: true });
+          if (!locked || locked.state !== 'drafted') throw new StaleStateError(product.id, 'drafted');
+          try {
+            await integrations.etsy.updateListing(etsyListingId, { state: 'active' });
+          } catch (err) {
+            etsyError = err;
+            throw err;
+          }
           const now = deps.now();
           await auditExternalWrite(
             q,
@@ -238,6 +238,16 @@ export function createDeskService(deps: OrchestratorDeps): DeskService {
         });
       } catch (err) {
         if (err instanceof StaleStateError) throw new DeskError('This product was already decided; reload the page.');
+        if (etsyError !== null) {
+          // The transaction rolled back; record the failed external write outside it.
+          logger.error({ productId: product.id, etsyListingId, err: errorMessage(etsyError) }, 'desk: Etsy activation failed');
+          await insertAudit(
+            db,
+            { actor: who, action: 'etsy.listing.activate_failed', entity: 'etsy_listing', entityId: String(etsyListingId), details: { productId: product.id, error: errorMessage(etsyError, 300) } },
+            deps.now(),
+          );
+          throw new DeskError('Etsy did not accept the activation. Nothing was changed; try again in a minute.');
+        }
         throw err;
       }
     },

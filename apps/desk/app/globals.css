@@ -304,6 +304,11 @@ pre {
   border: 1px solid transparent;
 }
 
+.banner-ok {
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+
 .banner-warn {
   background: var(--warn-bg);
   color: var(--warn);

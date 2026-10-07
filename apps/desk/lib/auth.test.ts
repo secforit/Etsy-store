@@ -4,6 +4,8 @@ import {
   DESK_ACTOR,
   hashPassword,
   parsePasswordHash,
+  revokeAllSessions,
+  sessionsNotBeforeMs,
   SESSION_COOKIE_NAME,
   SESSION_MAX_AGE_MS,
   sessionCookieOptions,
@@ -115,6 +117,24 @@ describe('session cookie (HMAC-SHA256, issued-at, 12 h)', () => {
     expect(verifySession(token, SECRET, T0 + SESSION_MAX_AGE_MS)).toBeNull();
     expect(verifySession(token, SECRET, T0 + 13 * 3600_000)).toBeNull();
     expect(SESSION_MAX_AGE_MS).toBe(12 * 3600_000);
+  });
+
+  it('rejects every session issued at or before a sign-out', () => {
+    const before = signSession(SECRET, T0);
+    const atSignOut = signSession(SECRET, T0 + 5_000);
+    const after = signSession(SECRET, T0 + 5_001);
+    const now = T0 + 10_000;
+    expect(verifySession(before, SECRET, now, SESSION_MAX_AGE_MS, T0 + 5_000)).toBeNull();
+    expect(verifySession(atSignOut, SECRET, now, SESSION_MAX_AGE_MS, T0 + 5_000)).toBeNull();
+    expect(verifySession(after, SECRET, now, SESSION_MAX_AGE_MS, T0 + 5_000)).not.toBeNull();
+    expect(verifySession(before, SECRET, now, SESSION_MAX_AGE_MS, 0)).not.toBeNull();
+  });
+
+  it('keeps the latest sign-out instant process-wide', () => {
+    const start = sessionsNotBeforeMs();
+    revokeAllSessions(start + 2_000);
+    revokeAllSessions(start + 1_000); // an older instant never moves it back
+    expect(sessionsNotBeforeMs()).toBe(start + 2_000);
   });
 
   it('rejects an issued-at in the future beyond the clock-skew allowance', () => {

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   cleanFilename,
+  DONE_NOTICES,
+  doneNotice,
   hasPngSignature,
   isAssetKind,
   isUuid,
@@ -21,6 +23,14 @@ describe('validate', () => {
     expect(safeNextPath('/queue?state=drafted')).toBe('/queue?state=drafted');
     for (const bad of ['https://evil.example', '//evil.example', '/\\evil.example', 'queue', '', '/login', '/x\u0000', null, 42]) {
       expect(safeNextPath(bad)).toBe('/');
+    }
+  });
+
+  it('maps ?done= only to fixed notices', () => {
+    expect(doneNotice('uploaded')).toBe(DONE_NOTICES.uploaded);
+    expect(doneNotice(['approved', 'x'])).toBe(DONE_NOTICES.approved);
+    for (const bad of [undefined, '', 'toString', '__proto__', '<script>', ['nope'], 1]) {
+      expect(doneNotice(bad)).toBeNull();
     }
   });
 

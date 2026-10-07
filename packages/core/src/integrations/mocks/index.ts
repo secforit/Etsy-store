@@ -13,6 +13,7 @@ import {
   createMockImageFetcher,
 } from './misc.ts';
 import { MockPrintifyClient } from './printify.ts';
+import type { ExternalWriteHook } from '../printify.ts';
 
 export * from './art.ts';
 export * from './etsy.ts';
@@ -38,6 +39,8 @@ export interface MockIntegrationOptions {
   /** getProduct polls before a published product shows its Etsy id (exercises QA polling). */
   publishPolls?: number;
   eurToUsd?: number;
+  /** Reported for every mock Printify write, exactly like the live client (audit_log wiring). */
+  onExternalWrite?: ExternalWriteHook;
 }
 
 export function createMockIntegrations(opts: MockIntegrationOptions = {}): MockIntegrations {
@@ -47,6 +50,7 @@ export function createMockIntegrations(opts: MockIntegrationOptions = {}): MockI
     etsy,
     publishPolls: opts.publishPolls ?? 0,
     ...(opts.eurToUsd ? { eurToUsd: opts.eurToUsd } : {}),
+    ...(opts.onExternalWrite ? { onExternalWrite: opts.onExternalWrite } : {}),
   });
   const trademark = new MockTrademarkClient();
   const imageGen = new MockImageGenClient(gpu);

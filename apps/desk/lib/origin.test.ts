@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildCsp } from './csp.ts';
+import { ASSET_CSP, buildCsp } from './csp.ts';
 import { allowedOrigins, checkOrigin, isMutationMethod, normalizeOrigin } from './origin.ts';
 
 const DESK = 'https://secforit-home.tail1234.ts.net';
@@ -59,5 +59,15 @@ describe('CSP', () => {
     }
     expect(buildCsp('abc123==', { isDev: false })).toContain("script-src 'self' 'nonce-abc123==' 'strict-dynamic'");
     expect(buildCsp('abc123==', { isDev: false })).not.toContain('unsafe-inline');
+    expect(buildCsp(null, { isDev: false })).not.toContain('unsafe-inline');
+    expect(buildCsp(null, { isDev: false })).toContain("script-src 'self';");
+  });
+
+  it('serves image downloads under a sandboxed, script-free policy', () => {
+    expect(ASSET_CSP).toContain("default-src 'none'");
+    expect(ASSET_CSP).toContain("frame-ancestors 'none'");
+    expect(ASSET_CSP).toContain('sandbox');
+    expect(ASSET_CSP).not.toContain('script-src');
+    expect(ASSET_CSP).not.toContain('unsafe-eval');
   });
 });

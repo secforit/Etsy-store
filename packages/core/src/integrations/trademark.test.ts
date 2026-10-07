@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { LiveTrademarkClient, mapMarkerRow, markerStatus, normaliseTrademarkTerm, parseNiceClasses } from './trademark.ts';
+import { LiveTrademarkClient, mapMarkerRow, markerStatus, normaliseTrademarkTerm, parseNiceClasses, searchTrademark } from './trademark.ts';
 import { fakeClock, jsonResponse, stubFetch } from './testing.ts';
 
 describe('Marker helpers', () => {
@@ -74,5 +74,30 @@ describe('LiveTrademarkClient', () => {
     expect(await client.search(' ! ')).toEqual([]);
     await client.search('frog');
     expect(fetch.calls).toHaveLength(1);
+  });
+
+  it('runs an exact-only query when asked (searchTrademark with prefix: false)', async () => {
+    const fetch = stubFetch(() => jsonResponse({ count: 1, trademarks: [{ serialnumber: '9', wordmark: 'LIFE IS GOOD', code: 'GS0251' }] }));
+    const client = new LiveTrademarkClient({ username: 'u', password: 'p', fetch, clock: fakeClock() });
+    const hits = await searchTrademark(client, 'Life is good', { prefix: false });
+    expect(hits.map((h) => h.mark)).toEqual(['LIFE IS GOOD']);
+    expect(fetch.calls).toHaveLength(1);
+    expect(decodeURIComponent(fetch.calls[0]!.url)).toContain('/trademark/life is good/status/');
+  });
+
+  it('reuses successful results within the TTL and never caches errors', async () => {
+    let fail = true;
+    const fetch = stubFetch(() => (fail ? new Response('down', { status: 503 }) : jsonResponse({ count: 0, trademarks: [] })));
+    const clock = fakeClock();
+    const client = new LiveTrademarkClient({ username: 'u', password: 'p', fetch, clock, wildcard: false, cacheTtlMs: 60_000 });
+    await expect(client.search('frog')).rejects.toThrow();
+    fail = false;
+    const before = fetch.calls.length;
+    await client.search('frog');
+    await client.search('FROG');
+    expect(fetch.calls.length - before).toBe(1); // the error was not cached; the success was
+    clock.advance(60_001);
+    await client.search('frog');
+    expect(fetch.calls.length - before).toBe(2);
   });
 });

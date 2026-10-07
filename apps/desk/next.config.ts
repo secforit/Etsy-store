@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { NextConfig } from 'next';
-import { buildCsp } from './lib/csp.ts';
+import { ASSET_CSP, buildCsp } from './lib/csp.ts';
 
 const appDir = path.dirname(fileURLToPath(import.meta.url));
 /** Monorepo root: lets Next trace and bundle packages/core (outside this app's folder). */
@@ -21,7 +21,7 @@ const securityHeaders = [
   { key: 'Referrer-Policy', value: 'same-origin' },
   {
     key: 'Permissions-Policy',
-    value: 'camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), bluetooth=(), browsing-topics=()',
+    value: 'camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), browsing-topics=()',
   },
   { key: 'Cross-Origin-Opener-Policy', value: 'same-origin' },
   { key: 'Cross-Origin-Resource-Policy', value: 'same-origin' },
@@ -42,6 +42,8 @@ const nextConfig: NextConfig = {
   // Native / wasm / worker-thread dependencies of core stay as runtime requires (traced into standalone).
   serverExternalPackages: ['sharp', 'pg', '@electric-sql/pglite', 'pino', '@anthropic-ai/sdk'],
   poweredByHeader: false,
+  // `next dev` would otherwise write AGENTS.md/CLAUDE.md into this app.
+  agentRules: false,
   reactStrictMode: true,
   // No image optimizer: every image is a private, authenticated asset served by a route handler.
   images: { unoptimized: true },
@@ -54,7 +56,11 @@ const nextConfig: NextConfig = {
     proxyClientMaxBodySize: '50mb',
   },
   async headers() {
-    return [{ source: '/:path*', headers: securityHeaders }];
+    return [
+      { source: '/:path*', headers: securityHeaders },
+      // Later rules override earlier ones for the same key: image downloads get the stricter sandbox policy.
+      { source: '/products/:id/asset/:kind', headers: [{ key: 'Content-Security-Policy', value: ASSET_CSP }] },
+    ];
   },
 };
 

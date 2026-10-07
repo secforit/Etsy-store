@@ -221,6 +221,24 @@ describe('design', () => {
     expect(res.outcome).toBe('failed');
     expect((await productState(db, id)).state).toBe('cleared');
   });
+
+  it('retries with backoff when the image sidecar is down, then succeeds without a duplicate design', async () => {
+    const h = await harness({ throwFrom: { designer: () => new Error('imagegen: 503 model loading') } });
+    const id = await seedProduct(db, h.clock.now(), { state: 'cleared' });
+    const first = await runStep(h, 'design', { productId: id });
+    expect(first.outcome).toBe('retry');
+    expect((await productState(db, id)).state).toBe('cleared');
+    expect(await getDesign(db, id)).toBeNull();
+    expect((await jobsOf(db, { productId: id }))[0]).toMatchObject({ status: 'queued', attempts: 1, last_error: 'Error: imagegen: 503 model loading' });
+
+    h.agents.behaviour.throwFrom = {};
+    h.clock.advance(31_000);
+    const second = await orchestrator(h).runOnce();
+    expect(second.status === 'ran' && second.outcome).toBe('done');
+    expect((await productState(db, id)).state).toBe('designed');
+    const { rows } = await db.query<{ n: unknown }>('SELECT count(*) AS n FROM designs WHERE product_id = $1', [id]);
+    expect(Number(rows[0]!.n)).toBe(1);
+  });
 });
 
 /* ----------------------------------- write ----------------------------------- */
@@ -252,7 +270,7 @@ describe('write', () => {
   });
 
   it('appends missing disclosures in code', () => {
-    const shop = { listing: { aiDisclosure: 'AI line.', productionPartnerDisclosure: 'Partner line.' } } as Parameters<typeof ensureDisclosures>[1];
+    const shop = { listing: { aiDisclosure: 'AI line.', productionPartnerDisclosure: 'Partner line.' } } as unknown as Parameters<typeof ensureDisclosures>[1];
     expect(ensureDisclosures('Body text.', shop)).toBe('Body text.\n\nAI line.\n\nPartner line.');
     expect(ensureDisclosures('Body.\n\nAI line.\n\nPartner line.', shop)).toBe('Body.\n\nAI line.\n\nPartner line.');
   });
@@ -341,6 +359,125 @@ describe('qa_publish', () => {
     const calls = h.agents.calls.filter((c) => c.agent === 'qaPublisher');
     expect((calls[1]!.input as { existingPrintifyProductId: string | null }).existingPrintifyProductId).toBe(`pf-${id.slice(0, 8)}`);
     expect((await productState(db, id)).state).toBe('drafted');
+  });
+
+  it('saves a new Printify product id as soon as it exists, so a run that dies later reuses it', async () => {
+    const h = await harness({ qa: (_i, call) => (call === 0 ? 'created_then_throw' : 'drafted') });
+    const id = await seedProduct(db, h.clock.now(), { state: 'final_cleared', withDesign: true, withListing: true });
+    const first = await runStep(h, 'qa_publish', { productId: id });
+    expect(first.outcome).toBe('retry');
+    expect((await getListing(db, id))!.printifyProductId).toBe(`pf-${id.slice(0, 8)}`);
+    expect(await auditActions(db, id)).toContain('printify.product.saved');
+
+    h.clock.advance(31_000);
+    await orchestrator(h).runOnce();
+    const calls = h.agents.calls.filter((c) => c.agent === 'qaPublisher');
+    expect((calls[1]!.input as { existingPrintifyProductId: string | null }).existingPrintifyProductId).toBe(`pf-${id.slice(0, 8)}`);
+    expect((await productState(db, id)).state).toBe('drafted');
+  });
+
+  it('tells the QA agent when it is the final attempt (no mockup check -> qa_failed instead of a retry)', async () => {
+    const h = await harness();
+    const id = await seedProduct(db, h.clock.now(), { state: 'final_cleared', withDesign: true, withListing: true });
+    await enqueue(db, { kind: 'qa_publish', productId: id, idempotencyKey: productStepKey('qa_publish', id, 0), maxAttempts: 1 }, h.clock.now());
+    await orchestrator(h).runOnce();
+    expect(h.agents.calls.find((c) => c.agent === 'qaPublisher')!.deps.finalAttempt).toBe(true);
+
+    const h2 = await harness();
+    const id2 = await seedProduct(db, h2.clock.now(), { state: 'final_cleared', withDesign: true, withListing: true });
+    await runStep(h2, 'qa_publish', { productId: id2 });
+    expect(h2.agents.calls.find((c) => c.agent === 'qaPublisher')!.deps.finalAttempt).toBe(false);
+  });
+
+  it('takes down an ACTIVE Etsy listing that Printify should have created as a draft, and blocks the product', async () => {
+    const h = await harness();
+    const etsy = h.integrations.fakes.etsy;
+    const createDraft = etsy.createDraft.bind(etsy);
+    etsy.createDraft = (title: string) => {
+      const listingId = createDraft(title);
+      etsy.listings.get(listingId)!.state = 'active'; // Printify's Etsy connection left on auto-publish
+      return listingId;
+    };
+    const id = await seedProduct(db, h.clock.now(), { state: 'final_cleared', withDesign: true, withListing: true });
+    const res = await runStep(h, 'qa_publish', { productId: id });
+    expect(res.outcome).toBe('done');
+    const st = await productState(db, id);
+    expect(st.state).toBe('blocked');
+    expect(st.blockReason).toContain('not as a draft');
+    const listing = (await getListing(db, id))!;
+    expect(etsy.updates).toEqual([{ listingId: listing.etsyListingId, patch: { state: 'inactive' } }]);
+    expect(etsy.listings.get(listing.etsyListingId!)!.state).toBe('inactive');
+    expect(await auditActions(db, id)).toEqual(expect.arrayContaining(['product.blocked']));
+    expect(await auditActions(db, String(listing.etsyListingId))).toContain('etsy.listing.deactivate');
+    expect(await auditActions(db, id)).not.toContain('product.drafted');
+    expect(h.logger.lines.some((l) => l.level === 'error')).toBe(true);
+  });
+
+  it('blocks without an Etsy write when the listing is neither a draft nor active', async () => {
+    const h = await harness();
+    const etsy = h.integrations.fakes.etsy;
+    const createDraft = etsy.createDraft.bind(etsy);
+    etsy.createDraft = (title: string) => {
+      const listingId = createDraft(title);
+      etsy.listings.get(listingId)!.state = 'inactive';
+      return listingId;
+    };
+    const id = await seedProduct(db, h.clock.now(), { state: 'final_cleared', withDesign: true, withListing: true });
+    await runStep(h, 'qa_publish', { productId: id });
+    expect((await productState(db, id)).state).toBe('blocked');
+    expect(etsy.updates).toEqual([]);
+  });
+
+  it('retries (does not record a draft) when Etsy cannot confirm the listing state', async () => {
+    const h = await harness();
+    h.integrations.fakes.etsy.getListing = async () => {
+      throw new Error('etsy fake: 503');
+    };
+    const id = await seedProduct(db, h.clock.now(), { state: 'final_cleared', withDesign: true, withListing: true });
+    const res = await runStep(h, 'qa_publish', { productId: id });
+    expect(res.outcome).toBe('retry');
+    expect((await productState(db, id)).state).toBe('final_cleared');
+  });
+});
+
+/* ------------------------------ LLM spend on failure ------------------------- */
+
+describe('agent runs of failed agents', () => {
+  const paid = { model: 'claude-test', inputTokens: 1000, outputTokens: 200, costUsd: 0.05, durationMs: 3 };
+
+  it('records a paid LLM call made before the agent failed on a later step', async () => {
+    const h = await harness();
+    h.deps.llm = { generate: async () => ({ output: {} as never, usage: paid }) };
+    h.agents.listingWriter = async (_input, deps) => {
+      await deps.llm.generate({ agent: 'listing_writer', tier: 'large', system: 's', instructions: 'i', schema: {} as never });
+      throw new Error('marker: quota exhausted');
+    };
+    const id = await seedProduct(db, h.clock.now(), { state: 'edited', withDesign: true });
+    const res = await runStep(h, 'write', { productId: id });
+    expect(res.outcome).toBe('retry');
+    const runs = await agentRuns('write');
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ agent: 'listing_writer', model: 'claude-test', ok: false });
+    expect(Number(runs[0]!.cost_usd)).toBeCloseTo(0.05);
+  });
+
+  it('records the usage of a failed LLM call once (not again from the error)', async () => {
+    const h = await harness();
+    const { LlmOutputError } = await import('../llm/errors.ts');
+    h.deps.llm = {
+      generate: async () => {
+        throw new LlmOutputError('invalid twice', paid);
+      },
+    };
+    h.agents.listingWriter = async (_input, deps) => {
+      await deps.llm.generate({ agent: 'listing_writer', tier: 'large', system: 's', instructions: 'i', schema: {} as never });
+      throw new Error('unreachable');
+    };
+    const id = await seedProduct(db, h.clock.now(), { state: 'edited', withDesign: true });
+    await runStep(h, 'write', { productId: id });
+    const runs = await agentRuns('write');
+    expect(runs).toHaveLength(1);
+    expect(Number(runs[0]!.cost_usd)).toBeCloseTo(0.05);
   });
 });
 
