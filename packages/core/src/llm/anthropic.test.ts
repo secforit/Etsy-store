@@ -2,7 +2,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { AnthropicLlm, toToolInputSchema } from './anthropic.ts';
-import { LlmOutputError } from './errors.ts';
+import { LlmOutputError, LlmTransportError, usageFromError } from './errors.ts';
 import { UNTRUSTED_DATA_RULE } from './prompt.ts';
 import { costUsd, parseLlmPrices } from './prices.ts';
 import { LlmError } from './types.ts';
@@ -110,6 +110,18 @@ describe('AnthropicLlm', () => {
     const err = await llm.generate(req).catch((e) => e);
     expect(err).toBeInstanceOf(LlmOutputError);
     expect(err.usage.costUsd).toBeGreaterThan(0);
+  });
+
+  it('keeps the paid first call in usage when the repair call fails on transport (spend cap still counts it)', async () => {
+    const rate = Object.assign(new Error('rate limited'), { status: 429 });
+    const { llm } = setup([toolReply({ answer: 'x' }), rate]);
+    const err = await llm.generate(req).catch((e) => e);
+    expect(err).toBeInstanceOf(LlmTransportError);
+    expect(err).toBeInstanceOf(LlmError);
+    expect(err.retryable).toBe(true);
+    expect(err.usage.inputTokens).toBe(1000);
+    expect(err.usage.costUsd).toBeCloseTo(0.006, 6);
+    expect(usageFromError(err)?.costUsd).toBeCloseTo(0.006, 6);
   });
 
   it('maps API errors: 429 retryable, 400 not', async () => {

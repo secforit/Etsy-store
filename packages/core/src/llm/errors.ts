@@ -15,9 +15,25 @@ export class LlmOutputError extends LlmError {
   }
 }
 
+/**
+ * A transport failure (HTTP 429/5xx, network) on a later call of the same request, after an earlier call
+ * already succeeded and was paid for. Keeps the retryable flag of the underlying error and carries the usage
+ * of the calls that did complete, so the spend cap still counts them.
+ */
+export class LlmTransportError extends LlmError {
+  constructor(
+    message: string,
+    retryable: boolean,
+    public readonly usage: LlmUsage,
+  ) {
+    super(message, retryable);
+    this.name = 'LlmTransportError';
+  }
+}
+
 /** Usage attached to an error thrown by an LLM client, if any. */
 export function usageFromError(err: unknown): LlmUsage | null {
-  return err instanceof LlmOutputError ? err.usage : null;
+  return err instanceof LlmOutputError || err instanceof LlmTransportError ? err.usage : null;
 }
 
 export interface LlmLogger {

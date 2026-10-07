@@ -425,7 +425,7 @@ nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv
 | Symptom | Fix |
 | --- | --- |
 | `CUDA out of memory` in `imagegen` logs | Something else holds VRAM. `./deploy/compose.sh exec ollama ollama stop gemma4:12b`; check `nvidia-smi` for host processes (desktop session, browser, another container) and stop them. Then retry the job (`retry-failed --kind design`). |
-| `ollama ps` shows a CPU share (for example `40%/60% CPU/GPU`), LLM jobs very slow | The model did not fit. Free VRAM as above; lower `OLLAMA_NUM_CTX` to `8192` in `.env` and `./deploy/compose.sh up -d worker`; optionally add `OLLAMA_KV_CACHE_TYPE: q8_0` to the `ollama` environment in `deploy/docker-compose.yml` (needs flash attention, already on) and `./deploy/compose.sh up -d ollama`. |
+| `ollama ps` shows a CPU share (for example `40%/60% CPU/GPU`), LLM jobs very slow | The model did not fit. Free VRAM as above; lower `OLLAMA_NUM_CTX` to `8192` in `.env.worker` (it overrides `.env`) and `./deploy/compose.sh up -d worker`; optionally add `OLLAMA_KV_CACHE_TYPE: q8_0` to the `ollama` environment in `deploy/docker-compose.yml` (needs flash attention, already on) and `./deploy/compose.sh up -d ollama`. |
 | Both GPU services stuck after a crash | `./deploy/compose.sh restart imagegen ollama`, then `check-gpu`. |
 | First design job slow, or 503 `model_unavailable` from the sidecar | It loads the weights on first use (slow); 503 means they are not in the `hf-models` volume. Run the `imagegen-download` setup service (section 6). |
 | `could not select device driver "nvidia"` when starting | NVIDIA Container Toolkit not registered (section 3). |

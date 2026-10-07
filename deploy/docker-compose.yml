@@ -247,8 +247,8 @@ services:
     restart: "no"
     logging: *logging
 
-  # One-shot: applies SQL migrations before the worker and the desk start. Only the shared .env (it needs just
-  # DATABASE_URL, which compose builds below): no API key reaches it.
+  # One-shot: applies SQL migrations before the worker and the desk start. It loads NO env file: it needs only
+  # DATABASE_URL (built below from POSTGRES_* by compose interpolation), MODE and LOG_LEVEL, so no API key reaches it.
   migrate:
     build: *worker-build
     image: etsy-agents/worker:local
@@ -257,11 +257,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    env_file:
-      - path: ../.env
-        required: true
     environment:
       <<: *app-env
+      MODE: ${MODE:-mock}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
     networks: [backend]
     read_only: true
     tmpfs:

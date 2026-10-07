@@ -6,7 +6,7 @@
  * Model ids come only from env (ANTHROPIC_MODEL_LARGE / _SMALL). Cost from the LLM_PRICES_JSON table.
  */
 import type Anthropic from '@anthropic-ai/sdk';
-import { LlmOutputError, silentLogger, type LlmLogger } from './errors.ts';
+import { LlmOutputError, LlmTransportError, silentLogger, type LlmLogger } from './errors.ts';
 import { costUsd, fallbackPrice, type LlmPriceTable } from './prices.ts';
 import { buildSystemPrompt, buildUserPrompt, repairInstruction, toModelJsonSchema, truncate, validateValue } from './prompt.ts';
 import { LlmError, type LlmClient, type LlmRequest, type LlmResponse, type LlmUsage } from './types.ts';
@@ -54,7 +54,7 @@ export class AnthropicLlm implements LlmClient {
     let lastError = '';
     for (let attempt = 0; attempt < 2; attempt++) {
       const started = this.clock();
-      const res = await this.call({
+      const params: Anthropic.MessageCreateParamsNonStreaming = {
         model,
         max_tokens: req.maxOutputTokens ?? this.opts.defaultMaxTokens ?? 4096,
         temperature: 0,
@@ -68,7 +68,18 @@ export class AnthropicLlm implements LlmClient {
           },
         ],
         tool_choice: { type: 'tool', name: TOOL_NAME, disable_parallel_tool_use: true },
-      });
+      };
+      let res: Anthropic.Message;
+      try {
+        res = await this.call(params);
+      } catch (err) {
+        // The repair call failed after the first call was already paid for: keep that usage on the error.
+        if (attempt > 0 && err instanceof LlmError) {
+          usage.durationMs += Math.max(0, Math.round(this.clock() - started));
+          throw new LlmTransportError(err.message, err.retryable, usage);
+        }
+        throw err;
+      }
       usage.durationMs += Math.max(0, Math.round(this.clock() - started));
       usage.inputTokens += res.usage?.input_tokens ?? 0;
       usage.outputTokens += res.usage?.output_tokens ?? 0;

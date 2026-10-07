@@ -79,7 +79,9 @@ describe('deploy: secrets scoped per container (SEC-10)', () => {
   const envFiles = (name: string) => [...(services.get(name) ?? '').matchAll(/- path: \.\.\/(\.env[a-z.]*)/g)].map((m) => m[1]);
 
   it('gives each app container only its own env files', () => {
-    expect(envFiles('migrate')).toEqual(['.env']);
+    // migrate needs only DATABASE_URL, MODE and LOG_LEVEL: it loads no env file, so no API key reaches it.
+    expect(envFiles('migrate')).toEqual([]);
+    expect(services.get('migrate')).not.toMatch(/env_file:/);
     expect(envFiles('worker')).toEqual(['.env', '.env.worker']);
     expect(envFiles('desk')).toEqual(['.env', '.env.desk']);
     expect(envFiles('imagegen-download')).toEqual(['.env.imagegen']);
