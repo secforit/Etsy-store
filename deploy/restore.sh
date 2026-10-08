@@ -32,6 +32,8 @@ echo "starting postgres"
 "$COMPOSE" up -d --wait postgres
 
 echo "restoring the database"
+# $POSTGRES_USER / $POSTGRES_DB expand inside the container, not here.
+# shellcheck disable=SC2016
 "$COMPOSE" exec -T postgres sh -c \
   'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists --no-owner --single-transaction --exit-on-error' \
   < "$src/db.dump"

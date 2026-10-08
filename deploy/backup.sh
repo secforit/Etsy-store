@@ -32,6 +32,8 @@ mkdir "$tmp"
 trap 'rm -rf "$tmp"' EXIT
 
 log "dumping Postgres"
+# $POSTGRES_USER / $POSTGRES_DB expand inside the container, not here.
+# shellcheck disable=SC2016
 "$COMPOSE" exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom --compress=6' \
   > "$tmp/db.dump" || fail "pg_dump"
 [[ -s "$tmp/db.dump" ]] || fail "pg_dump produced an empty file"

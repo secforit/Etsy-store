@@ -12,7 +12,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "typecheck": "tsc -p packages/core/tsconfig.json --noEmit && tsc -p apps/worker/tsconfig.json --noEmit",
+    "typecheck": "tsc -p packages/core/tsconfig.json --noEmit && tsc -p apps/worker/tsconfig.json --noEmit && tsc -p apps/desk/tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "demo": "tsx apps/worker/src/cli.ts demo",
