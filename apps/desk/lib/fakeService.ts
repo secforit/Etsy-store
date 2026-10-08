@@ -12,6 +12,7 @@ import type {
   UploadedFile,
 } from '@etsy-agents/core/desk/contracts.ts';
 import { DeskError } from '@etsy-agents/core/desk/contracts.ts';
+import { evaluateGates, type RolloutMetrics, type RolloutScorecard } from '@etsy-agents/core/domain/rollout.ts';
 import { PRODUCT_STATES } from '@etsy-agents/core/domain/types.ts';
 import type { ProductState, Settings } from '@etsy-agents/core/domain/types.ts';
 import { hasPngSignature, MAX_UPLOAD_BYTES } from './validate.ts';
@@ -125,6 +126,8 @@ export function createFakeDeskService(): DeskService {
     updatedAt: iso(600),
   };
   const draftsToday = 1;
+  // Decisions taken before this dev session, plus the ones made in it.
+  const decisions = { approved: 17, rejected: 9, ipMisses: 0 };
 
   const find = (id: string): ProductDetail => {
     const p = products.find((d) => d.product.id === id);
@@ -182,12 +185,40 @@ export function createFakeDeskService(): DeskService {
       const d = find(id);
       if (d.product.state !== 'drafted') throw new DeskError(`Only drafted products can be approved (now "${d.product.state}").`);
       setState(d, 'live');
+      decisions.approved += 1;
     },
-    async reject(id, reason) {
+    async reject(id, reason, _actor, opts) {
       const d = find(id);
       if (d.product.state !== 'drafted') throw new DeskError(`Only drafted products can be rejected (now "${d.product.state}").`);
       if (!reason.trim() || reason.length > 500) throw new DeskError('A reason of 1-500 characters is required.');
       setState(d, 'rejected');
+      decisions.rejected += 1;
+      if (opts?.ipMiss) decisions.ipMisses += 1;
+    },
+    async getRollout(): Promise<RolloutScorecard> {
+      const reviewed = decisions.approved + decisions.rejected;
+      const metrics: RolloutMetrics = {
+        draftsMade: reviewed + products.filter((d) => d.product.state === 'drafted').length,
+        draftsReviewed: reviewed,
+        approved: decisions.approved,
+        rejected: decisions.rejected,
+        approvalRate: reviewed > 0 ? Math.round((decisions.approved / reviewed) * 10_000) / 10_000 : null,
+        ipMisses: decisions.ipMisses,
+        cloudSpendUsd: 0.31,
+        listingFeesUsd: Math.round(decisions.approved * 20) / 100,
+        costPerListingUsd: decisions.approved > 0 ? Math.round(((0.31 + decisions.approved * 0.2) / decisions.approved) * 100) / 100 : null,
+        views: 412,
+        favorites: 9,
+        orders: 2,
+        revenueEur: 51.98,
+        conversion: 0.0049,
+        revenuePerOrderEur: 25.99,
+        blockRateBySource: [
+          { source: 'etsy_search', checked: 31, blocked: 7, rate: 0.2258 },
+          { source: 'seasonal', checked: 12, blocked: 1, rate: 0.0833 },
+        ],
+      };
+      return { metrics, gates: evaluateGates(metrics) };
     },
     async getAsset(id, kind: AssetKind) {
       const d = products.find((p) => p.product.id === id);

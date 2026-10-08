@@ -28,6 +28,7 @@ import {
   productStepKey,
   silentLogger,
   MemoryBlobStorage,
+  UNATTRIBUTED_SOURCE,
   Orchestrator,
   type Db,
   type DeskService,
@@ -269,6 +270,26 @@ describe('end to end on the real mocks', () => {
     expect(dash.draftsToday).toBe(DRAFT_CAP);
     expect(dash.spendTodayUsd).toBe(0);
   }, 120_000);
+
+  it('the rollout scorecard reads what the pipeline and the desk wrote', async () => {
+    const { metrics, gates } = await desk.getRollout();
+    expect(metrics).toMatchObject({
+      draftsMade: DRAFT_CAP,
+      draftsReviewed: 1,
+      approved: 1,
+      rejected: 0,
+      approvalRate: 1,
+      ipMisses: 0,
+      cloudSpendUsd: 0,
+      costPerListingUsd: SHOP.pricing.listingFeeUsd, // all-local models: only Etsy's listing fee
+    });
+    // The hand-made blocklisted concept has no trend signals; trend-scout niches attribute to their sources.
+    expect(metrics.blockRateBySource).toContainEqual({ source: UNATTRIBUTED_SOURCE, checked: 1, blocked: 1, rate: 1 });
+    const scouted = metrics.blockRateBySource.filter((s) => s.source !== UNATTRIBUTED_SOURCE);
+    expect(scouted.length).toBeGreaterThan(0);
+    expect(scouted.every((s) => s.checked > 0 && s.blocked === 0)).toBe(true);
+    expect(gates[0]).toMatchObject({ id: 'gate2', status: 'open' });
+  });
 
   it('the next UTC day the cap resets and a held draft goes out', async () => {
     clock.set('2026-10-07T00:00:05.000Z');

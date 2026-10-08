@@ -5,6 +5,7 @@ import {
   doneNotice,
   hasPngSignature,
   isAssetKind,
+  isChecked,
   isUuid,
   parseRejectReason,
   parseSettingsForm,
@@ -52,6 +53,12 @@ describe('validate', () => {
     expect(parseRejectReason('   ').ok).toBe(false);
     expect(parseRejectReason('x'.repeat(501)).ok).toBe(false);
     expect(parseRejectReason(null).ok).toBe(false);
+  });
+
+  it('reads a checkbox as checked only for the browser default value', () => {
+    expect(isChecked(form({ ipMiss: 'on' }).get('ipMiss'))).toBe(true);
+    expect(isChecked(form({}).get('ipMiss'))).toBe(false);
+    for (const other of ['true', '1', 'yes', '', 'ON', null, true]) expect(isChecked(other)).toBe(false);
   });
 
   it('parses the settings form strictly', () => {

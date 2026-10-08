@@ -4,6 +4,7 @@
  * external APIs directly.
  * CONTRACT FILE: owned by the foundation. Builders may ADD members, never change existing ones.
  */
+import type { RolloutScorecard } from '../domain/rollout.ts';
 import type {
   ComplianceCheck,
   Design,
@@ -48,6 +49,11 @@ export interface DashboardStats {
 
 export type AssetKind = 'art' | 'edited' | 'print';
 
+export interface RejectOptions {
+  /** The reason is an IP / trademark problem the Compliance Guard missed (counts against rollout Gate 2). */
+  ipMiss?: boolean;
+}
+
 export interface UploadedFile {
   bytes: Uint8Array;
   filename: string;
@@ -71,8 +77,10 @@ export interface DeskService {
   /** drafted -> live: activates the Etsy listing. */
   approve(productId: string, actor: string): Promise<void>;
   /** drafted -> rejected; reason (required, <= 500 chars) becomes an avoid-rule. */
-  reject(productId: string, reason: string, actor: string): Promise<void>;
+  reject(productId: string, reason: string, actor: string, opts?: RejectOptions): Promise<void>;
   getAsset(productId: string, kind: AssetKind): Promise<{ bytes: Uint8Array; mimeType: string } | null>;
+  /** Rollout gates (Gate 2, Gate 3) and the all-time metrics behind them. Read-only, no external calls. */
+  getRollout(): Promise<RolloutScorecard>;
   getSettings(): Promise<Settings>;
   updateSettings(
     patch: Partial<Pick<Settings, 'paused' | 'dailyDraftCap' | 'dailySpendCapUsd' | 'blocklist'>>,

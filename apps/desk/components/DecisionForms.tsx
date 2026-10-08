@@ -36,6 +36,16 @@ export function RejectForm({ productId }: { productId: string }) {
         </label>
         <textarea id="reason" name="reason" required maxLength={500} />
       </div>
+      <div className="field">
+        <label className="check">
+          <input type="checkbox" name="ipMiss" />
+          <span>IP problem the compliance check missed</span>
+          <span className="hint">
+            Tick when the design or copy uses a trademark, brand, character or celebrity that the checks let through.
+            It counts against rollout Gate 2.
+          </span>
+        </label>
+      </div>
       <SubmitButton className="btn btn-danger" pendingText="Rejecting…">
         Reject
       </SubmitButton>

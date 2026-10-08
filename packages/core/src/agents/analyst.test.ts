@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AnalystInput } from './contracts.ts';
-import { decideFollowUps, decideRetirements, quantile, runAnalyst } from './analyst.ts';
+import { approvalRate, decideFollowUps, decideRetirements, quantile, runAnalyst } from './analyst.ts';
 import { ScriptedLlm, TODAY, shop } from './testing/fakes.ts';
 
 const l = (productId: string, over: Partial<AnalystInput['listings'][number]> = {}): AnalystInput['listings'][number] => ({
@@ -47,6 +47,11 @@ describe('Analyst code rules', () => {
     expect(decideFollowUps(input.listings)).toEqual(['n-win']);
   });
 
+  it('reports the weekly approval rate, or a dash without decisions', () => {
+    expect(approvalRate({ approvalsThisWeek: 2, rejectionsThisWeek: 1 })).toBe('67%');
+    expect(approvalRate({ approvalsThisWeek: 0, rejectionsThisWeek: 0 })).toBe('–');
+  });
+
   it('ignores the model for decisions and prepends a code facts block to its report', async () => {
     const llm = new ScriptedLlm({ analyst: () => ({ reportMarkdown: '## Summary\nRetire everything! (model opinion)' }) });
     const { output, llmUsage } = await runAnalyst(input, { llm, shop, today: TODAY });
@@ -55,6 +60,7 @@ describe('Analyst code rules', () => {
     expect(output.reportMarkdown.startsWith('# Weekly report: week of 2026-10-05')).toBe(true);
     expect(output.reportMarkdown).toContain('| Orders | 3 |');
     expect(output.reportMarkdown).toContain('| Revenue (EUR) | 74.97 |');
+    expect(output.reportMarkdown).toContain('| Approval rate this week (rollout target 60%) | 75% |');
     expect(output.reportMarkdown).toContain('Retire everything!');
     expect(llmUsage).toHaveLength(1);
   });

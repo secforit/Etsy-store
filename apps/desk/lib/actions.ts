@@ -18,6 +18,7 @@ import { assertSameOrigin, endSession, requireActionAuth, startSession } from '.
 import {
   cleanFilename,
   hasPngSignature,
+  isChecked,
   isUuid,
   MAX_UPLOAD_BYTES,
   parseRejectReason,
@@ -184,9 +185,10 @@ export async function rejectAction(_prev: ActionState, formData: FormData): Prom
   if (!isUuid(productId)) return fail('Unknown product.');
   const reason = parseRejectReason(formData.get('reason'));
   if (!reason.ok) return fail(reason.message);
+  const ipMiss = isChecked(formData.get('ipMiss'));
   try {
     const svc = await getDeskService();
-    await svc.reject(productId, reason.value, session.actor);
+    await svc.reject(productId, reason.value, session.actor, { ipMiss });
   } catch (err) {
     return toUserMessage('reject', err);
   }

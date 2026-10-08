@@ -344,12 +344,19 @@ such write is in the audit log. Then open the desk, review Settings (caps, block
 ```bash
 ./deploy/compose.sh ps                                   # health of every service
 ./deploy/compose.sh logs -f --tail 100 worker            # what the agents are doing (JSON lines)
-./deploy/compose.sh run --rm --no-deps worker status     # paused?, drafts and spend vs caps, products, jobs, failures
+./deploy/compose.sh run --rm --no-deps worker status     # paused?, drafts and spend vs caps, products, jobs, failures, gates
 ./deploy/compose.sh run --rm --no-deps worker retry-failed [--kind qa_publish] [--job <uuid>]
 ```
 
 * **Pause / resume**: the desk dashboard or Settings. The worker finishes the job in progress, then claims
   nothing until you resume. Periodic jobs are still queued, at most one pending per kind, so no backlog builds up.
+* **Rollout gates**: the desk's Rollout page (and `status`) tracks the gates from the rollout plan, over all time.
+  Gate 2 (pilot quality): 50 drafts reviewed, 60% or more approved, no IP misses. Gate 3 (first profit): at least
+  one order, cost per published listing (cloud model spend plus Etsy's $0.20 listing fee) at most $0.25, margin per
+  sale close to the model (a manual check: compare Printify's order costs with the product page's margin estimate).
+  Raise the daily draft cap in Settings (5, then 10 after Gate 2) only when the gate passes. When you reject a draft
+  because of a trademark, brand, character or celebrity that the compliance checks let through, tick "IP problem
+  the compliance check missed": that is what Gate 2 counts, and adding the term to the blocklist stops it next time.
 * **Caps** reset at 00:00 UTC. At the draft cap, `qa_publish` jobs wait (they are not failed and keep their
   attempts). At the spend cap, only jobs of agents routed to a cloud model wait; local jobs continue.
 * **Failed jobs**: a job is retried with backoff (30 s, 2 min, 8 min...) and fails after 3 attempts, or at once

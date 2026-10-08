@@ -65,6 +65,11 @@ export function parseRejectReason(raw: unknown): Parsed<string> {
   return { ok: true, value: reason };
 }
 
+/** A checked HTML checkbox without a `value` attribute submits "on"; anything else counts as unchecked. */
+export function isChecked(raw: unknown): boolean {
+  return raw === 'on';
+}
+
 export const DRAFT_CAP_MAX = 100;
 export const SPEND_CAP_MAX_USD = 1000;
 export const BLOCKLIST_MAX_ENTRIES = 500; // matches the DeskService limits

@@ -17,6 +17,7 @@ export default async function DeskLayout({ children }: { children: ReactNode }) 
           <nav className="nav" aria-label="Main">
             <Link href="/">Dashboard</Link>
             <Link href="/queue">Queue</Link>
+            <Link href="/rollout">Rollout</Link>
             <Link href="/settings">Settings</Link>
             <form action={logoutAction} className="inline-form">
               <button type="submit">Sign out</button>

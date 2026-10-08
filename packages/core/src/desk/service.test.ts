@@ -171,6 +171,21 @@ describe('approve / reject', () => {
     expect(approvals.rows[0]).toMatchObject({ decision: 'reject' });
     expect(await auditActions(db, id)).toEqual(['product.reject']);
     expect(h.integrations.fakes.etsy.updates).toEqual([]);
+    const flag = await db.query<{ ip_miss: boolean }>('SELECT ip_miss FROM approvals WHERE product_id = $1', [id]);
+    expect(flag.rows[0]?.ip_miss).toBe(false);
+  });
+
+  it('reject can mark the reason as an IP miss: stored, audited, logged and counted against Gate 2', async () => {
+    const { id } = await draftedProduct();
+    await desk.reject(id, 'Uses a live trademark phrase the check missed', 'razvan', { ipMiss: true });
+    const row = await db.query<{ ip_miss: boolean }>('SELECT ip_miss FROM approvals WHERE product_id = $1', [id]);
+    expect(row.rows[0]?.ip_miss).toBe(true);
+    const audit = await db.query<{ details: { ipMiss?: boolean } }>(`SELECT details FROM audit_log WHERE action = 'product.reject' AND entity_id = $1`, [id]);
+    expect(audit.rows[0]?.details.ipMiss).toBe(true);
+    expect(h.logger.lines.some((l) => l.level === 'warn' && /IP miss/.test(l.msg ?? ''))).toBe(true);
+    const card = await desk.getRollout();
+    expect(card.metrics).toMatchObject({ draftsReviewed: 1, rejected: 1, ipMisses: 1 });
+    expect(card.gates[0]!.checks.find((c) => c.id === 'ip_misses')?.status).toBe('not_met');
   });
 
   it('reject validates the reason and the state', async () => {
