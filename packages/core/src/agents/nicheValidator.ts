@@ -7,6 +7,7 @@
 import { z } from 'zod';
 import { PRODUCT_TYPES, type ProductType } from '../domain/types.ts';
 import type { LlmUsage } from '../llm/types.ts';
+import { AGENT_DEFAULT_TIERS } from '../llm/tiers.ts';
 import { NicheValidatorOutputSchema, type NicheValidatorOutput, type RunNicheValidator } from './contracts.ts';
 import { askModel } from './common.ts';
 import type { NicheValidatorDepsExt } from './extensions.ts';
@@ -97,7 +98,7 @@ export const runNicheValidator: RunNicheValidator = async (input, baseDeps) => {
     deps.llm,
     {
       agent: 'niche_validator',
-      tier: 'large',
+      tier: AGENT_DEFAULT_TIERS.niche_validator,
       system: NICHE_VALIDATOR_SYSTEM,
       instructions: nicheValidatorInstructions({
         minPrices: options.map((o) => ({ productType: o.productType, minPriceEur: finalizePrice(o.floorEur, shop) })),

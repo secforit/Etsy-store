@@ -21,6 +21,7 @@ import { z } from 'zod';
 import type { TrademarkHit } from '../domain/types.ts';
 import { searchTrademark } from '../integrations/trademark.ts';
 import type { LlmImage, LlmUsage } from '../llm/types.ts';
+import { AGENT_DEFAULT_TIERS } from '../llm/tiers.ts';
 import {
   ComplianceGuardOutputSchema,
   type ComplianceGuardDeps,
@@ -240,7 +241,7 @@ export const runComplianceGuard: RunComplianceGuard = async (input, deps) => {
       deps.llm,
       {
         agent: 'compliance_guard',
-        tier: 'large',
+        tier: AGENT_DEFAULT_TIERS.compliance_guard,
         system: COMPLIANCE_GUARD_SYSTEM,
         instructions: complianceInstructions({
           stage: input.stage,

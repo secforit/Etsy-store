@@ -21,16 +21,19 @@ cd apps/imagegen && uv venv --python 3.12 && uv pip install -e '.[dev]' && .venv
 Follow [docs/RUNBOOK.md](docs/RUNBOOK.md): Docker + NVIDIA Container Toolkit, env files, `deploy/compose.sh up -d`,
 model downloads, `tailscale serve` for the desk, mock run, then the going-live checklist.
 
+On a Mac (no GPU, cloud models): [docs/MAC.md](docs/MAC.md). `./deploy/init-env.sh --cloud` writes the env files with
+DeepSeek V4 Pro for decisions, V4 Flash for the workload (Nous) and fal.ai for the images.
+
 ## Layout
 
 | Path | What it is |
 | --- | --- |
-| `packages/core` | Domain types, state machine, Postgres schema, integrations (Etsy, Printify, Marker, trends, GPU, storage), LLM clients (Ollama, optional Anthropic), the seven agents, orchestrator, desk service |
-| `apps/worker` | CLI: `migrate`, `run`, `demo`, `setup-catalog`, `hash-password`, `check-gpu` |
+| `packages/core` | Domain types, state machine, Postgres schema, integrations (Etsy, Printify, Marker, trends, GPU, storage), LLM clients (Ollama, Nous, optional Anthropic), fal.ai images, the seven agents, orchestrator, desk service |
+| `apps/worker` | CLI: `migrate`, `run`, `demo`, `setup-catalog`, `hash-password`, `check-gpu`, `check-cloud`, `status`, `retry-failed` |
 | `apps/desk` | Approval desk (Next.js), single-user login, served on 127.0.0.1 and reached over Tailscale |
 | `apps/imagegen` | GPU sidecar (FastAPI): FLUX.2 [klein] 4B, BiRefNet, Real-ESRGAN |
-| `deploy` | Docker Compose, Dockerfile, env checks, backup and restore |
-| `docs` | `RUNBOOK.md` (operations), `MODELS.md` (models and licenses), `BUILD_SPEC.md` (design rules) |
+| `deploy` | Docker Compose, Dockerfile, env setup (`init-env.sh`) and checks, backup and restore |
+| `docs` | `RUNBOOK.md` (operations), `MAC.md` (Mac with cloud models), `MODELS.md` (models and licenses), `BUILD_SPEC.md` (design rules) |
 
 ## Models (commercial use allowed)
 
@@ -40,9 +43,10 @@ print-size upscaling.
 
 Cloud: `LLM_DEFAULT_PROVIDER=nous` runs the agents on open models through the Nous Research inference API;
 `IMAGEGEN_PROVIDER=fal` runs the same FLUX.2 klein / BiRefNet / Real-ESRGAN models on fal.ai. Mix per agent with
-`LLM_ROUTES`; `deploy/compose.sh` starts only the GPU services the configuration uses, and `worker check-cloud` checks
-the keys and models. Setup: [docs/RUNBOOK.md](docs/RUNBOOK.md) section 6. Details and how to swap:
-[docs/MODELS.md](docs/MODELS.md).
+`LLM_ROUTES` and choose each agent's model size with `LLM_TIERS`; `deploy/compose.sh` starts only the GPU services
+the configuration uses, and `worker check-cloud` checks the keys and models and prints which model each agent uses.
+Setup: [docs/RUNBOOK.md](docs/RUNBOOK.md) section 6 (server) or [docs/MAC.md](docs/MAC.md) (Mac). Details and how to
+swap: [docs/MODELS.md](docs/MODELS.md).
 
 ## Checks
 

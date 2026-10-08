@@ -4,11 +4,12 @@
  * deploy/check-env.sh guard that deploy/compose.sh runs before every compose command.
  */
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { loadEnv } from '@etsy-agents/core/config/env.ts';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const read = (rel: string) => readFileSync(path.join(ROOT, rel), 'utf8');
@@ -182,6 +183,26 @@ describe.skipIf(process.platform !== 'linux')('deploy/check-env.sh', () => {
     expect(run()).toEqual({ code: 0, err: '' });
   });
 
+  it('reads file modes with BSD stat too (macOS: no `stat -c`)', () => {
+    setup({ ...good }, 0o644);
+    // A stand-in for macOS stat: rejects -c, answers `stat -f %Lp FILE` with the octal mode.
+    const bin = mkdtempSync(path.join(tmpdir(), 'bsd-stat-'));
+    const real = spawnSync('bash', ['-c', 'command -v stat'], { encoding: 'utf8' }).stdout.trim();
+    writeFileSync(
+      path.join(bin, 'stat'),
+      `#!/bin/sh\nif [ "$1" = -c ]; then echo "stat: illegal option -- c" >&2; exit 1; fi\nif [ "$1" = -f ] && [ "$2" = %Lp ]; then exec ${real} -c %a "$3"; fi\nexit 2\n`,
+    );
+    chmodSync(path.join(bin, 'stat'), 0o755);
+    try {
+      const { code, err } = run({ PATH: `${bin}:${process.env.PATH ?? '/usr/bin:/bin'}` });
+      expect(code).toBe(1);
+      expect(err).toContain('readable by group/others (mode 644)');
+      expect(err).not.toContain('illegal option');
+    } finally {
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
   it('refuses an OLLAMA_IMAGE override without a digest (env file or shell)', () => {
     setup({ ...good, '.env': `${good['.env']}OLLAMA_IMAGE='ollama/ollama:latest'\n` });
     expect(run().err).toContain('OLLAMA_IMAGE (.env) must be pinned by digest');
@@ -222,5 +243,78 @@ describe.skipIf(process.platform !== 'linux')('deploy/profiles.sh', () => {
 
   it('lets .env.worker override .env', () => {
     expect(profiles('IMAGEGEN_PROVIDER=local\nLLM_DEFAULT_PROVIDER=ollama\n', 'IMAGEGEN_PROVIDER=fal\nLLM_DEFAULT_PROVIDER=nous\n')).toBe('');
+  });
+});
+
+describe.skipIf(process.platform !== 'linux')('deploy/init-env.sh', () => {
+  let dir: string;
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  // A scratch "repository": the templates and the deploy scripts, so the script's ROOT is the scratch directory.
+  function init(args: string[], env: Record<string, string> = {}) {
+    dir = mkdtempSync(path.join(tmpdir(), 'init-env-'));
+    mkdirSync(path.join(dir, 'deploy'));
+    for (const f of ['.env.example', '.env.worker.example', '.env.desk.example']) copyFileSync(path.join(ROOT, f), path.join(dir, f));
+    for (const f of ['init-env.sh', 'check-env.sh', 'profiles.sh']) copyFileSync(path.join(ROOT, 'deploy', f), path.join(dir, 'deploy', f));
+    const res = spawnSync('bash', [path.join(dir, 'deploy/init-env.sh'), ...args], { encoding: 'utf8', env: { PATH: process.env.PATH ?? '/usr/bin:/bin', ...env } });
+    return { code: res.status, out: res.stdout, err: res.stderr };
+  }
+  const file = (name: string) => readFileSync(path.join(dir, name), 'utf8');
+  /** KEY=VALUE lines the way compose reads them (comments skipped, one level of surrounding quotes removed). */
+  function parse(...names: string[]): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const name of names) {
+      for (const line of file(name).split('\n')) {
+        const m = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(line);
+        if (m) out[m[1]!] = m[2]!.replace(/^'(.*)'$/, '$1').replace(/^"(.*)"$/, '$1');
+      }
+    }
+    return out;
+  }
+  const checkEnv = () => spawnSync('bash', [path.join(dir, 'deploy/check-env.sh'), dir], { encoding: 'utf8', env: { PATH: process.env.PATH ?? '/usr/bin:/bin' } });
+
+  it('--cloud: Nous DeepSeek preset + fal, mode 600, passes check-env, no GPU profile, loads as a valid config', () => {
+    const { code, out } = init(['--cloud']);
+    expect(code).toBe(0);
+    for (const f of ['.env', '.env.worker', '.env.desk']) expect(statSync(path.join(dir, f)).mode & 0o777, f).toBe(0o600);
+    const env = parse('.env', '.env.worker', '.env.desk');
+    expect(env.POSTGRES_PASSWORD).toMatch(/^[0-9a-f]{48}$/);
+    expect(env.DESK_SESSION_SECRET!.length).toBeGreaterThanOrEqual(32);
+    expect(env.DESK_ORIGIN).toBe('http://localhost:3000');
+    expect(env).toMatchObject({
+      LLM_DEFAULT_PROVIDER: 'nous',
+      NOUS_MODEL_LARGE: 'deepseek/deepseek-v4-pro',
+      NOUS_MODEL_SMALL: 'deepseek/deepseek-v4-flash',
+      LLM_TIERS: '{"trend_scout":"small","listing_writer":"small"}',
+      IMAGEGEN_PROVIDER: 'fal',
+    });
+    expect(env.IMAGEGEN_TOKEN).toBeUndefined();
+    expect(file('.env.worker')).toMatch(/^# IMAGEGEN_TOKEN=$/m);
+    expect(out).toContain('Still to do: NOUS_API_KEY');
+    expect(checkEnv().status).toBe(0);
+    expect(spawnSync('bash', [path.join(dir, 'deploy/profiles.sh'), dir], { encoding: 'utf8' }).stdout.trim()).toBe('');
+    const loaded = loadEnv({ ...env, NOUS_API_KEY: 'n', FAL_KEY: 'f' });
+    expect(loaded.LLM_TIERS).toEqual({ trend_scout: 'small', listing_writer: 'small' });
+  });
+
+  it('takes model and origin overrides, and the local setup gets an IMAGEGEN_TOKEN', () => {
+    expect(init(['--cloud', '--desk-origin', 'https://mac.example.ts.net'], { NOUS_MODEL_VISION: 'vendor/vision', NOUS_MODEL_SMALL: 'vendor/small' }).code).toBe(0);
+    expect(parse('.env.worker', '.env.desk')).toMatchObject({ NOUS_MODEL_VISION: 'vendor/vision', NOUS_MODEL_SMALL: 'vendor/small', DESK_ORIGIN: 'https://mac.example.ts.net' });
+    rmSync(dir, { recursive: true, force: true });
+    expect(init([]).code).toBe(0);
+    expect(parse('.env.worker').IMAGEGEN_TOKEN).toMatch(/^[0-9a-f]{64}$/);
+    expect(parse('.env.worker').LLM_DEFAULT_PROVIDER).toBe('ollama');
+    expect(checkEnv().status).toBe(0);
+  });
+
+  it('never overwrites existing env files and rejects a bad origin', () => {
+    expect(init([]).code).toBe(0);
+    const before = file('.env');
+    const again = spawnSync('bash', [path.join(dir, 'deploy/init-env.sh')], { encoding: 'utf8' });
+    expect(again.status).toBe(1);
+    expect(again.stderr).toContain('already exists');
+    expect(file('.env')).toBe(before);
+    rmSync(dir, { recursive: true, force: true });
+    expect(init(['--desk-origin', 'http://localhost:3000/']).code).toBe(2);
   });
 });

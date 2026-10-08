@@ -36,7 +36,8 @@ value_of() {
 
 check_mode() {
   local perms
-  perms="$(stat -c '%a' "$1")"
+  # GNU stat (Linux) or BSD stat (macOS).
+  perms="$(stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1")"
   if [[ "${perms: -1}" != "0" || "${perms: -2:1}" != "0" ]]; then
     problem "$1 is readable by group/others (mode $perms). Run: chmod 600 $1"
   fi

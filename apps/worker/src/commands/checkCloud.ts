@@ -5,10 +5,13 @@
  *    images. Lists image-capable models when the vision model is missing or text-only.
  *  - fal (IMAGEGEN_PROVIDER=fal): FAL_KEY is set and the per-call prices the spend cap uses. fal has no free call to
  *    validate a key, so the first design job is the real test.
+ *  - Which model each agent uses (provider, LLM_TIERS / built-in tier, vision model for image checks).
  * Never prints a key.
  */
 import { VISION_AGENTS, llmProviderFor, usesLlmProvider, type Env } from '@etsy-agents/core/config/env.ts';
+import { AGENT_NAMES } from '@etsy-agents/core/domain/types.ts';
 import { NousCatalog, type NousModelInfo } from '@etsy-agents/core/llm/nousCatalog.ts';
+import { tierFor } from '@etsy-agents/core/llm/tiers.ts';
 import type { OrchestratorEnv } from '@etsy-agents/core/orchestrator/config.ts';
 import type { Io } from '../io.ts';
 
@@ -72,6 +75,26 @@ export async function checkCloud(env: Env, fetchImpl: FetchLike = fetch): Promis
   return result;
 }
 
+/** The model id a provider uses for a tier ('' when not configured). */
+function modelId(env: Env, provider: string, role: 'large' | 'small' | 'vision'): string {
+  const ids: Record<string, Record<typeof role, string | undefined>> = {
+    nous: { large: env.NOUS_MODEL_LARGE, small: env.NOUS_MODEL_SMALL, vision: env.NOUS_MODEL_VISION },
+    ollama: { large: env.OLLAMA_MODEL_LARGE, small: env.OLLAMA_MODEL_SMALL, vision: env.OLLAMA_MODEL_VISION },
+    anthropic: { large: env.ANTHROPIC_MODEL_LARGE, small: env.ANTHROPIC_MODEL_SMALL, vision: env.ANTHROPIC_MODEL_LARGE },
+  };
+  return ids[provider]?.[role] ?? '';
+}
+
+/** One line per agent: provider, tier and model id (plus the vision model for agents that send images). */
+export function agentModelLines(env: Env): string[] {
+  return AGENT_NAMES.map((agent) => {
+    const provider = llmProviderFor(env, agent);
+    const tier = tierFor(env, agent);
+    const vision = (VISION_AGENTS as readonly string[]).includes(agent) ? `; images: ${modelId(env, provider, 'vision') || '(not set)'}` : '';
+    return `  ${agent.padEnd(16)} ${provider} ${tier.padEnd(5)} ${modelId(env, provider, tier) || '(not set)'}${vision}`;
+  });
+}
+
 const usdPerM = (p: NonNullable<NousModelInfo['price']>) => `$${p.inputPerMTokUsd} in / $${p.outputPerMTokUsd} out per M tokens`;
 
 export function printCloudCheck(io: Io, env: Env, settings: Pick<OrchestratorEnv, 'FAL_COST_PER_IMAGE_USD' | 'FAL_COST_PER_BACKGROUND_REMOVAL_USD' | 'FAL_COST_PER_UPSCALE_USD'>, r: CloudCheckResult): void {
@@ -106,5 +129,7 @@ export function printCloudCheck(io: Io, env: Env, settings: Pick<OrchestratorEnv
         `$${settings.FAL_COST_PER_UPSCALE_USD} per upscale`,
     );
   }
+  io.out('Agents (LLM_ROUTES / LLM_TIERS):');
+  for (const line of agentModelLines(env)) io.out(line);
   io.out(r.ok ? 'Cloud providers: READY' : 'Cloud providers: NOT READY');
 }

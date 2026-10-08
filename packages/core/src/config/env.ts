@@ -17,6 +17,10 @@ export const CLOUD_LLM_PROVIDERS: readonly LlmProviderName[] = ['anthropic', 'no
 export const IMAGEGEN_PROVIDERS = ['local', 'recraft', 'fal'] as const;
 export type ImagegenProviderName = (typeof IMAGEGEN_PROVIDERS)[number];
 
+/** Model sizes an agent's text calls can use (each provider maps them to its *_MODEL_LARGE / *_MODEL_SMALL). */
+export const MODEL_TIERS = ['large', 'small'] as const;
+export type ModelTier = (typeof MODEL_TIERS)[number];
+
 const EnvObjectSchema = z
   .object({
     MODE: z.enum(['mock', 'live']).default('mock'),
@@ -100,6 +104,24 @@ const EnvObjectSchema = z
 
     /** fal.ai (IMAGEGEN_PROVIDER=fal): FLUX.2 [klein] 4B art, BiRefNet backgrounds, Real-ESRGAN upscaling. */
     FAL_KEY: nonEmpty.optional(),
+
+    /**
+     * Per-agent model size override, e.g. {"trend_scout":"small"}: which of the provider's *_MODEL_LARGE /
+     * *_MODEL_SMALL an agent's text calls use. Unset agents keep their built-in tier. Calls with images always use
+     * the vision model.
+     */
+    LLM_TIERS: z
+      .string()
+      .optional()
+      .transform((s, ctx) => {
+        if (!s) return {} as Record<string, ModelTier>;
+        try {
+          return z.record(z.string(), z.enum(MODEL_TIERS)).parse(JSON.parse(s));
+        } catch {
+          ctx.addIssue({ code: 'custom', message: `LLM_TIERS must be JSON like {"trend_scout":"small"} (tiers: ${MODEL_TIERS.join(', ')})` });
+          return z.NEVER;
+        }
+      }),
   });
 
 /** The LLM provider that serves `agent` (LLM_ROUTES[agent], else LLM_DEFAULT_PROVIDER). */

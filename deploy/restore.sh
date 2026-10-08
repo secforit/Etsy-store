@@ -18,7 +18,9 @@ src="${1:-}"
 for f in db.dump blobs.tar.gz SHA256SUMS; do
   [[ -f "$src/$f" ]] || { echo "restore: $src/$f is missing" >&2; exit 1; }
 done
-( cd "$src" && sha256sum --check --quiet SHA256SUMS ) || { echo "restore: checksum mismatch, refusing" >&2; exit 1; }
+# sha256sum (Linux) or shasum (macOS).
+if command -v sha256sum > /dev/null; then check_sums() { sha256sum --check --quiet SHA256SUMS; }; else check_sums() { shasum -a 256 -c SHA256SUMS > /dev/null; }; fi
+( cd "$src" && check_sums ) || { echo "restore: checksum mismatch, refusing" >&2; exit 1; }
 
 echo "This replaces the database and all stored designs with the backup in:"
 echo "  $src"

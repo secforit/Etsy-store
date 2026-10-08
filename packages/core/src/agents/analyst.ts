@@ -6,6 +6,7 @@
  */
 import { z } from 'zod';
 import type { LlmUsage } from '../llm/types.ts';
+import { AGENT_DEFAULT_TIERS } from '../llm/tiers.ts';
 import { AnalystOutputSchema, type AnalystInput, type RunAnalyst } from './contracts.ts';
 import { askModel } from './common.ts';
 import { roundCents } from './pricing.ts';
@@ -93,7 +94,7 @@ export const runAnalyst: RunAnalyst = async (input, deps) => {
       deps.llm,
       {
         agent: 'analyst',
-        tier: 'large',
+        tier: AGENT_DEFAULT_TIERS.analyst,
         system: ANALYST_SYSTEM,
         instructions: analystInstructions({ weekStart: input.weekStart }),
         untrustedData: {

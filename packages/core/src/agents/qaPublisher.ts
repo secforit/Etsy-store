@@ -21,6 +21,7 @@ import type { PrintSpec, ShopConfig } from '../config/shop.ts';
 import type { ProductType } from '../domain/types.ts';
 import type { ImageInspection, PrintifyCatalogEntry, PrintifyProduct } from '../integrations/types.ts';
 import type { LlmImage, LlmUsage } from '../llm/types.ts';
+import { AGENT_DEFAULT_TIERS } from '../llm/tiers.ts';
 import { QaPublisherOutputSchema, type QaPublisherOutput, type RunQaPublisher } from './contracts.ts';
 import { askModel, isPng, safeKeySegment, toVisionImage } from './common.ts';
 import { isTransparentProduct } from './designer.ts';
@@ -268,7 +269,7 @@ export const runQaPublisher: RunQaPublisher = async (input, baseDeps) => {
       deps.llm,
       {
         agent: 'qa_publisher',
-        tier: 'small',
+        tier: AGENT_DEFAULT_TIERS.qa_publisher,
         system: QA_VISION_SYSTEM,
         instructions: qaVisionInstructions({ productType: input.productType, transparent, imageCount: images.length }),
         untrustedData: { listingTitle: input.listing.title },

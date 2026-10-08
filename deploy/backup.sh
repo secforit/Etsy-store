@@ -19,6 +19,8 @@ COMPOSE="$ROOT/deploy/compose.sh"
 BACKUP_DIR="${BACKUP_DIR:-/srv/etsy-agents/backups}"
 KEEP_DAYS="${BACKUP_KEEP_DAYS:-14}"
 
+# sha256sum (Linux) or shasum (macOS); same output format.
+sha256() { if command -v sha256sum > /dev/null; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
 log() { printf '%s backup: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 fail() { log "FAILED: $*"; exit 1; }
 
@@ -44,9 +46,9 @@ log "archiving blob storage"
 "$COMPOSE" run --rm --no-deps -T --entrypoint tar worker \
   --create --gzip --file - --directory /data/blobs --exclude ./.secrets . \
   > "$tmp/blobs.tar.gz" || fail "tar of /data/blobs"
-tar --list --gzip --file "$tmp/blobs.tar.gz" > /dev/null || fail "blob archive is not readable"
+tar -tzf "$tmp/blobs.tar.gz" > /dev/null || fail "blob archive is not readable"
 
-( cd "$tmp" && sha256sum db.dump blobs.tar.gz > SHA256SUMS )
+( cd "$tmp" && sha256 db.dump blobs.tar.gz > SHA256SUMS )
 final="$BACKUP_DIR/etsy-agents-$stamp"
 mv "$tmp" "$final"
 trap - EXIT
