@@ -1,12 +1,15 @@
 /**
- * Small operator commands: `status` (caps, counts, queue) and `retry-failed` (requeue failed jobs after fixing
+ * Small operator commands: `status` (caps, counts, queue, rollout gates) and `retry-failed` (requeue failed jobs after fixing
  * the cause, e.g. a Printify outage). Both are audited where they change state.
  */
+import { SHOP } from '@etsy-agents/core/config/shop.ts';
 import type { Db } from '@etsy-agents/core/db/db.ts';
+import type { GateCheckStatus, GateStatus } from '@etsy-agents/core/domain/rollout.ts';
 import { JOB_KINDS, type AgentName, type JobKind } from '@etsy-agents/core/domain/types.ts';
 import { checkCaps } from '@etsy-agents/core/orchestrator/caps.ts';
 import { jobCounts } from '@etsy-agents/core/orchestrator/queue.ts';
 import { countsByState, insertAudit, isUuid } from '@etsy-agents/core/orchestrator/repo.ts';
+import { loadRolloutScorecard } from '@etsy-agents/core/orchestrator/rollout.ts';
 import type { Io } from '../io.ts';
 
 export async function printStatus(db: Db, now: Date, cloudAgents: readonly AgentName[], io: Io): Promise<void> {
@@ -23,7 +26,15 @@ export async function printStatus(db: Db, now: Date, cloudAgents: readonly Agent
   io.out(`Products          : ${Object.entries(states).filter(([, n]) => n > 0).map(([s, n]) => `${s}=${n}`).join(', ') || 'none'}`);
   io.out(`Jobs              : ${Object.entries(jobs).map(([s, n]) => `${s}=${n}`).join(', ')}`);
   for (const f of failed.rows) io.out(`  failed ${f.kind} ${f.id}: ${(f.last_error ?? '').slice(0, 160)}`);
+  const rollout = await loadRolloutScorecard(db, SHOP);
+  for (const gate of rollout.gates) {
+    io.out(`${gate.title.padEnd(18)}: ${GATE_LABELS[gate.status]}`);
+    for (const c of gate.checks) io.out(`  ${CHECK_MARKS[c.status]} ${c.label}: ${c.value} (target: ${c.target})`);
+  }
 }
+
+const GATE_LABELS: Record<GateStatus, string> = { passed: 'PASSED', review: 'ready for review', open: 'not yet' };
+const CHECK_MARKS: Record<GateCheckStatus, string> = { met: '[ok]', not_met: '[!!]', waiting: '[..]', manual: '[??]' };
 
 export async function retryFailed(db: Db, now: Date, io: Io, filter: { kind?: string; jobId?: string } = {}): Promise<number> {
   if (filter.kind && !(JOB_KINDS as readonly string[]).includes(filter.kind)) throw new Error(`unknown job kind ${filter.kind}`);

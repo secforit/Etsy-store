@@ -2,13 +2,15 @@
  * DeskService: everything the approval desk may do. The desk app imports ONLY createDeskServiceFromEnv (plus
  * loadEnv and types); it never touches the DB or external APIs directly.
  *  - approve:  drafted -> live, activates the Etsy listing (external write, audited)
- *  - reject:   drafted -> rejected, the reason becomes an avoid-rule for the Designer and Listing Writer
+ *  - reject:   drafted -> rejected, the reason becomes an avoid-rule for the Designer and Listing Writer; optionally
+ *              marked as an IP miss (an IP problem the Compliance Guard did not catch, rollout Gate 2)
  *  - upload:   designed -> edited, after PNG validation + sharp re-encode (security rule 6); enqueues `write`
  * Every human action writes audit_log. Errors the user can fix are DeskError with a safe message.
  */
 import { z } from 'zod';
 import { costBasisFromCatalog, marginFor } from '../agents/pricing.ts';
 import type { Env } from '../config/env.ts';
+import type { RolloutScorecard } from '../domain/rollout.ts';
 import { HUMAN_WAIT_STATES } from '../domain/stateMachine.ts';
 import { PRODUCT_STATES, type ProductState, type Settings } from '../domain/types.ts';
 import { auditExternalWrite } from '../orchestrator/audit.ts';
@@ -16,6 +18,7 @@ import { insertAvoidRule } from '../orchestrator/avoidRules.ts';
 import type { OrchestratorDeps } from '../orchestrator/contracts.ts';
 import { errorMessage } from '../orchestrator/logger.ts';
 import { enqueueNextStep } from '../orchestrator/queue.ts';
+import { loadRolloutScorecard } from '../orchestrator/rollout.ts';
 import {
   StaleStateError,
   countDraftsSince,
@@ -44,6 +47,7 @@ import {
   type DeskService,
   type ProductDetail,
   type ProductSummary,
+  type RejectOptions,
   type UploadedFile,
 } from './contracts.ts';
 import { validateAndReencodePng } from './upload.ts';
@@ -252,8 +256,9 @@ export function createDeskService(deps: OrchestratorDeps): DeskService {
       }
     },
 
-    async reject(productId: string, reason: string, actor: string): Promise<void> {
+    async reject(productId: string, reason: string, actor: string, opts: RejectOptions = {}): Promise<void> {
       const who = cleanActor(actor);
+      const ipMiss = opts?.ipMiss === true;
       const text = typeof reason === 'string' ? reason.trim() : '';
       if (!text) throw new DeskError('Please give a reason; it teaches the agents what to avoid.');
       if (text.length > REJECT_REASON_MAX) throw new DeskError(`The reason must be at most ${REJECT_REASON_MAX} characters.`);
@@ -263,20 +268,30 @@ export function createDeskService(deps: OrchestratorDeps): DeskService {
         await db.tx(async (q) => {
           const now = deps.now();
           await transitionProduct(q, { productId: product.id, from: 'drafted', event: 'reject', actor: who, now });
-          await q.query('INSERT INTO approvals (product_id, decision, reason, actor, decided_at) VALUES ($1, $2, $3, $4, $5)', [
+          await q.query('INSERT INTO approvals (product_id, decision, reason, actor, decided_at, ip_miss) VALUES ($1, $2, $3, $4, $5, $6)', [
             product.id,
             'reject',
             text,
             who,
             now,
+            ipMiss,
           ]);
           const rule = await insertAvoidRule(q, { reason: text, sourceProductId: product.id, actor: who }, now);
-          await insertAudit(q, { actor: who, action: 'product.reject', entity: 'product', entityId: product.id, details: { reason: text, avoidRule: rule } }, now);
+          await insertAudit(
+            q,
+            { actor: who, action: 'product.reject', entity: 'product', entityId: product.id, details: { reason: text, avoidRule: rule, ipMiss } },
+            now,
+          );
         });
       } catch (err) {
         if (err instanceof StaleStateError) throw new DeskError('This product was already decided; reload the page.');
         throw err;
       }
+      if (ipMiss) logger.warn({ productId: product.id }, 'desk: rejection marked as an IP miss (rollout Gate 2)');
+    },
+
+    async getRollout(): Promise<RolloutScorecard> {
+      return loadRolloutScorecard(db, deps.shop);
     },
 
     async getAsset(productId: string, kind: AssetKind): Promise<{ bytes: Uint8Array; mimeType: string } | null> {

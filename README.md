@@ -37,12 +37,15 @@ Gemma 4 12B via Ollama (`gemma4:12b`, Apache 2.0) for all agents and the vision 
 (Apache 2.0) for art; BiRefNet (MIT) for transparent backgrounds; Real-ESRGAN x4plus (BSD-3-Clause) for print-size
 upscaling. Details and how to swap: [docs/MODELS.md](docs/MODELS.md).
 
-## Git history
+## Checks
 
-The full history ships as `etsy-agents.bundle`. To restore it in this folder:
+`.github/workflows/ci.yml` runs on every pull request and every push to `main`: typecheck (core, worker, desk),
+the TypeScript tests, the offline demo, the desk production build, the sidecar tests, `shellcheck` on `deploy/*.sh`
+and `docker compose config` against the env templates. No secrets, no GPU, no network calls from the tests.
 
-```bash
-git init -b master && git fetch etsy-agents.bundle master && git reset FETCH_HEAD && git checkout -- . && git status
-```
+## Rollout gates
 
-`git checkout -- .` also restores the executable bit on `deploy/*.sh`, which a plain file copy can drop.
+The desk's **Rollout** page (and `worker status`) tracks the gates from the rollout plan: Gate 2 (50 drafts
+reviewed, 60% or more approved, no IP misses) before the daily cap goes from 5 to 10, and Gate 3 (first sales,
+cost per published listing at most $0.25, margin close to the model) before it goes higher. See
+[docs/RUNBOOK.md](docs/RUNBOOK.md) section 10.

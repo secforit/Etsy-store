@@ -45,6 +45,12 @@ export function decideFollowUps(listings: AnalystInput['listings']): string[] {
   return [...new Set(listings.filter((l) => l.orders > 0).map((l) => l.nicheId))].sort();
 }
 
+/** Approvals / decisions this week as a whole percentage, '–' without decisions. */
+export function approvalRate(input: Pick<AnalystInput, 'approvalsThisWeek' | 'rejectionsThisWeek'>): string {
+  const decided = input.approvalsThisWeek + input.rejectionsThisWeek;
+  return decided > 0 ? `${Math.round((input.approvalsThisWeek / decided) * 100)}%` : '–';
+}
+
 function factsBlock(input: AnalystInput, retire: string[], followUps: string[], retireAfterDays: number): string {
   const sum = (f: (l: AnalystInput['listings'][number]) => number) => input.listings.reduce((a, l) => a + f(l), 0);
   const themeOf = (nicheId: string) => input.listings.find((l) => l.nicheId === nicheId)?.theme ?? nicheId;
@@ -60,6 +66,7 @@ function factsBlock(input: AnalystInput, retire: string[], followUps: string[], 
     `| Orders | ${sum((l) => l.orders)} |`,
     `| Revenue (EUR) | ${roundCents(sum((l) => l.revenueEur)).toFixed(2)} |`,
     `| Drafts / approvals / rejections this week | ${input.draftsThisWeek} / ${input.approvalsThisWeek} / ${input.rejectionsThisWeek} |`,
+    `| Approval rate this week (rollout target 60%) | ${approvalRate(input)} |`,
     `| Cloud model spend this week (USD) | ${roundCents(input.spendUsdThisWeek).toFixed(2)} |`,
     '',
     `**Retire** (code rule: ${retireAfterDays}+ days, no favorites, no orders, bottom-quartile views): ${retire.length ? retire.join(', ') : 'none'}`,

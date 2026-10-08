@@ -52,7 +52,7 @@ describe('cli main', () => {
   it('migrate applies migrations on an in-memory database in mock mode', async () => {
     const io = new MemoryIo();
     expect(await main(['migrate'], { io, env: loadEnv({ MODE: 'mock' }) })).toBe(0);
-    expect(io.lines[0]).toMatch(/Applied 001_init\.sql, 002_orchestrator\.sql \(pglite\)/);
+    expect(io.lines[0]).toMatch(/Applied 001_init\.sql, 002_orchestrator\.sql, 003_rollout\.sql \(pglite\)/);
   });
 
   it('readPassword strips exactly one trailing newline from piped input', async () => {
@@ -75,6 +75,9 @@ describe('operator commands', () => {
     expect(io.text()).toMatch(/Drafts today\s+: 0 \/ 5/);
     expect(io.text()).toMatch(/Cloud spend today : \$0\.00 \/ \$10\.00/);
     expect(io.text()).toMatch(/failed analyze .*: boom/);
+    expect(io.text()).toMatch(/Gate 2: pilot quality: not yet/);
+    expect(io.text()).toMatch(/\[\.\.\] Drafts reviewed: 0 of 50 \(target: 50\)/);
+    expect(io.text()).toMatch(/\[\?\?\] Margin per sale: no sales yet/);
   });
 
   it('retry-failed requeues failed jobs and audits it', async () => {

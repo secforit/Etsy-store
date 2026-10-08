@@ -11,7 +11,8 @@ database or external APIs directly.
 | `/login` | Password sign-in (rate limited: 5 attempts per IP per 15 min) |
 | `/` | Dashboard: counts by state, drafts and cloud spend against today's caps, pause/resume, latest weekly report |
 | `/queue` | Products filtered by state, the ones waiting on you first |
-| `/products/<id>` | Raw art, edited file, print file, compliance results, listing copy, margin; upload, approve, reject |
+| `/products/<id>` | Raw art, edited file, print file, compliance results, listing copy, margin; upload, approve, reject (optionally marked as an IP miss) |
+| `/rollout` | Rollout gates 2 and 3 (drafts reviewed, approval rate, IP misses, first sales, cost per listing, margin), the numbers behind them, block rate by trend source |
 | `/settings` | Daily draft cap, daily cloud spend cap, blocklist, pause |
 | `/products/<id>/asset/<art\|edited\|print>` | Authenticated image download (`private, no-store`) |
 | `/healthz` | Liveness for the container healthcheck (no data) |

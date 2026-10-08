@@ -19,6 +19,7 @@ export { latestAvoidRules, insertAvoidRule, avoidRuleFromReason, AVOID_RULES_LIM
 export { externalWriteAuditHook, auditExternalWrite, sanitizeDetails } from './audit.ts';
 export { STEP_HANDLERS, AgentOutputError, MissingDataError, isPermanentError, ensureDisclosures } from './steps.ts';
 export { listPinnedCatalog, pinCatalog, dbCatalogResolver } from './catalog.ts';
+export { loadRolloutScorecard, loadRolloutMetrics, blockRateBySource, UNATTRIBUTED_SOURCE } from './rollout.ts';
 export { buildRuntime, openDb, type Runtime, type RuntimeOptions } from './runtime.ts';
 export { loadOrchestratorEnv, cloudModelsWithoutPrice, scopeEnvForLoad, type OrchestratorEnv } from './config.ts';
 export { createLogger, silentLogger, errorMessage } from './logger.ts';
