@@ -172,7 +172,12 @@ unloaded), then run the pipeline in mock mode and on one real product before goi
   `flux_guidance` in `config.py`). Any other architecture needs a new `Generator` implementation in
   `apps/imagegen/src/imagegen/` behind the same interface (`interfaces.py`) and a factory in `real.py`.
 - **Cloud agents on open models:** `LLM_DEFAULT_PROVIDER=nous` (or per agent in `LLM_ROUTES`) + `NOUS_API_KEY`,
-  `NOUS_MODEL_LARGE`, `NOUS_MODEL_SMALL`, `NOUS_MODEL_VISION` ("Cloud models" above).
+  `NOUS_MODEL_LARGE`, `NOUS_MODEL_SMALL`, `NOUS_MODEL_VISION` ("Cloud models" above). For example DeepSeek V4 Pro
+  (`deepseek/deepseek-v4-pro`) for decisions and V4 Flash (`deepseek/deepseek-v4-flash`) for the workload; both
+  read text only, so the vision model is a separate image-capable id (`check-cloud` lists them). `docs/MAC.md` has
+  this setup end to end.
+- **Model size per agent:** `LLM_TIERS='{"trend_scout":"small"}'` moves an agent between the provider's large and
+  small model (built-in sizes: `packages/core/src/llm/tiers.ts`). `check-cloud` prints the agent -> model map.
 - **Cloud images:** `IMAGEGEN_PROVIDER=fal` + `FAL_KEY` (the sidecar's models on fal.ai, costs per call), or
   `IMAGEGEN_PROVIDER=recraft` + `RECRAFT_API_KEY` (no sidecar needed; costs per image).
 - **Matting:** `IMAGEGEN_BIREFNET_REPO` + `IMAGEGEN_BIREFNET_REVISION` (another BiRefNet variant from the same author,

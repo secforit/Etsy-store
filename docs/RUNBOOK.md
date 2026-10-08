@@ -131,6 +131,9 @@ for f in .env .env.worker .env.desk; do cp "$f.example" "$f"; done
 chmod 600 .env .env.worker .env.desk     # compose.sh refuses env files readable by others
 ```
 
+Or let `./deploy/init-env.sh` do this section's copying and secrets (works on Linux and macOS; `--cloud` also fills
+the Nous and fal settings of section 6; it never overwrites an existing file). By hand:
+
 Generate the infrastructure secrets (each command fills an empty line of the template in place):
 
 ```bash
@@ -189,6 +192,8 @@ no GPU: skip section 3 and the downloads below. You can also mix, for example ke
 `LLM_ROUTES='{"compliance_guard":"ollama"}'`; `compose.sh` starts exactly the GPU services the mix uses.
 
 1. Create a key at portal.nousresearch.com and one at fal.ai (dashboard, keys).
+   (On a fresh install, `./deploy/init-env.sh --cloud` does steps 2 and section 4's secrets in one go, and asks for
+   both keys. On a Mac, follow `docs/MAC.md`.)
 2. In `.env.worker`:
 
    ```
@@ -197,6 +202,7 @@ no GPU: skip section 3 and the downloads below. You can also mix, for example ke
    NOUS_MODEL_LARGE=<vendor/model>          # e.g. nousresearch/hermes-4-405b; check-cloud confirms the ids
    NOUS_MODEL_SMALL=<vendor/model>
    NOUS_MODEL_VISION=<vendor/model>         # must accept images (final compliance look, QA mockup check)
+   # LLM_TIERS='{"trend_scout":"small"}'    # optional: which agents use the SMALL model instead of LARGE
    IMAGEGEN_PROVIDER=fal
    FAL_KEY=...
    # IMAGEGEN_TOKEN=                        # comment it out: no sidecar runs

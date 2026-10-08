@@ -11,6 +11,7 @@ import { z } from 'zod';
 import type { ShopConfig } from '../config/shop.ts';
 import type { ProductType } from '../domain/types.ts';
 import type { LlmUsage } from '../llm/types.ts';
+import { AGENT_DEFAULT_TIERS } from '../llm/tiers.ts';
 import { DesignerOutputSchema, type DesignerInput, type RunDesigner } from './contracts.ts';
 import { askModel, isPng, safeKeySegment, stableSeed } from './common.ts';
 import type { DesignerDepsExt } from './extensions.ts';
@@ -116,7 +117,7 @@ export const runDesigner: RunDesigner = async (input, baseDeps) => {
     deps.llm,
     {
       agent: 'designer',
-      tier: 'small',
+      tier: AGENT_DEFAULT_TIERS.designer,
       system: DESIGNER_SYSTEM,
       instructions: designerInstructions({
         productType: input.productType,

@@ -20,6 +20,7 @@ import { DEFAULT_EUR_TO_USD, applyPriceRules, costBasisFromCatalog, minPriceEur 
 import { LISTING_WRITER_SYSTEM, listingWriterInstructions } from './prompts.ts';
 import { collapseSpaces, containsTerm, effectiveBlocklist, findBlocklistHits, normalizeText, removeSentencesWithTerms, sameTerm, uniqueBy } from './rules.ts';
 import type { TrademarkClient } from '../integrations/types.ts';
+import { AGENT_DEFAULT_TIERS } from '../llm/tiers.ts';
 
 export const ListingWriterModelSchema = z.object({
   title: z.string().min(10).max(200),
@@ -166,7 +167,7 @@ export const runListingWriter: RunListingWriter = async (input, baseDeps) => {
     deps.llm,
     {
       agent: 'listing_writer',
-      tier: 'large',
+      tier: AGENT_DEFAULT_TIERS.listing_writer,
       system: LISTING_WRITER_SYSTEM,
       instructions: listingWriterInstructions({
         productType: input.productType,

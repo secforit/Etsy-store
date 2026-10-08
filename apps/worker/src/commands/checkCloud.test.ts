@@ -1,8 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadEnv } from '@etsy-agents/core/config/env.ts';
 import { loadOrchestratorEnv } from '@etsy-agents/core/orchestrator/config.ts';
 import { MemoryIo } from '../io.ts';
-import { checkCloud, printCloudCheck } from './checkCloud.ts';
+import { main } from '../cli.ts';
+import { agentModelLines, checkCloud, printCloudCheck } from './checkCloud.ts';
 
 const KEY = 'nous-secret-key-123';
 const settings = loadOrchestratorEnv({});
@@ -108,5 +109,46 @@ describe('check-cloud', () => {
     printCloudCheck(io, env, settings, r);
     expect(io.text()).toMatch(/Nous {5}: not used \(LLM_DEFAULT_PROVIDER=ollama\)/);
     expect(io.text()).toMatch(/fal {6}: not used \(IMAGEGEN_PROVIDER=local\)/);
+  });
+
+  it('prints the model each agent uses: LLM_TIERS moves agents between the large and small models', () => {
+    const env = cloudEnv({
+      NOUS_MODEL_LARGE: 'deepseek/deepseek-v4-pro',
+      NOUS_MODEL_SMALL: 'deepseek/deepseek-v4-flash',
+      LLM_TIERS: '{"trend_scout":"small","listing_writer":"small"}',
+    });
+    const lines = agentModelLines(env).join('\n');
+    expect(lines).toMatch(/trend_scout +nous small deepseek\/deepseek-v4-flash/);
+    expect(lines).toMatch(/listing_writer +nous small deepseek\/deepseek-v4-flash/);
+    expect(lines).toMatch(/designer +nous small deepseek\/deepseek-v4-flash/);
+    expect(lines).toMatch(/niche_validator +nous large deepseek\/deepseek-v4-pro/);
+    expect(lines).toMatch(/analyst +nous large deepseek\/deepseek-v4-pro/);
+    expect(lines).toMatch(/compliance_guard +nous large deepseek\/deepseek-v4-pro; images: vendor\/vision-a/);
+    expect(lines).toMatch(/qa_publisher +nous small deepseek\/deepseek-v4-flash; images: vendor\/vision-a/);
+  });
+});
+
+describe('check-cloud command', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('runs in live mode before the Etsy, Printify and Marker keys exist, and names a missing vision model', async () => {
+    vi.stubGlobal('fetch', stub().fn);
+    const io = new MemoryIo();
+    const code = await main(['check-cloud'], {
+      io,
+      rawEnv: {
+        MODE: 'live',
+        LLM_DEFAULT_PROVIDER: 'nous',
+        IMAGEGEN_PROVIDER: 'fal',
+        NOUS_API_KEY: KEY,
+        NOUS_MODEL_LARGE: 'nousresearch/hermes-4-405b',
+        NOUS_MODEL_SMALL: 'nousresearch/hermes-4-70b',
+        FAL_KEY: 'fal-secret',
+      },
+    });
+    expect(code).toBe(1);
+    expect(io.text()).toMatch(/vision \(NOUS_MODEL_VISION not set\): MISSING/);
+    expect(io.text()).toMatch(/image-capable models in your catalog: vendor\/vision-a, vendor\/vision-b/);
+    expect(io.text()).not.toContain(KEY);
   });
 });

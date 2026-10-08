@@ -30,11 +30,12 @@ routes="$(setting LLM_ROUTES)"
 imagegen="$(setting IMAGEGEN_PROVIDER)"
 token="$(setting IMAGEGEN_TOKEN)"
 
-profiles=()
+# A plain string, not an array: macOS ships bash 3.2, where an empty array is "unbound" under `set -u`.
+profiles=""
 if [[ "${llm_default:-ollama}" == "ollama" || "$routes" == *'"ollama"'* ]]; then
-  profiles+=(ollama)
+  profiles="ollama"
 fi
 if [[ "${imagegen:-local}" == "local" || ("$imagegen" == "recraft" && -n "$token") ]]; then
-  profiles+=(imagegen)
+  profiles="${profiles:+$profiles,}imagegen"
 fi
-(IFS=,; echo "${profiles[*]}")
+echo "$profiles"

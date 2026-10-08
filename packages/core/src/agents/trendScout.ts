@@ -10,6 +10,7 @@ import {
   type TrendScoutOutput,
 } from './contracts.ts';
 import type { LlmUsage } from '../llm/types.ts';
+import { AGENT_DEFAULT_TIERS } from '../llm/tiers.ts';
 import { askModel } from './common.ts';
 import { trendScoutInstructions, trendScoutSystem } from './prompts.ts';
 import { clip, collapseSpaces, effectiveBlocklist, findBlocklistHits, normalizeText, sameTerm } from './rules.ts';
@@ -34,7 +35,7 @@ export const runTrendScout: RunTrendScout = async (input, deps) => {
     deps.llm,
     {
       agent: 'trend_scout',
-      tier: 'large',
+      tier: AGENT_DEFAULT_TIERS.trend_scout,
       system: trendScoutSystem(maxNiches),
       instructions: trendScoutInstructions({ today: deps.today, productTypes: input.productTypes, blocklist }),
       untrustedData: {

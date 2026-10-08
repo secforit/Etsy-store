@@ -35,6 +35,9 @@ export function createLlm(env: Env, opts: CreateLlmOptions): LlmClient {
   for (const key of Object.keys(routes)) {
     if (!(AGENT_NAMES as readonly string[]).includes(key)) logger.warn({ route: key }, 'LLM_ROUTES has a key that is not an agent name; it is ignored');
   }
+  for (const key of Object.keys(env.LLM_TIERS)) {
+    if (!(AGENT_NAMES as readonly string[]).includes(key)) logger.warn({ tier: key }, 'LLM_TIERS has a key that is not an agent name; it is ignored');
+  }
 
   const providers: Partial<Record<LlmProvider, LlmClient>> = {};
   if (usesLlmProvider(env, 'ollama')) {
@@ -75,5 +78,5 @@ export function createLlm(env: Env, opts: CreateLlmOptions): LlmClient {
     });
   }
 
-  return new RoutedLlm({ providers, routes, defaultProvider: env.LLM_DEFAULT_PROVIDER });
+  return new RoutedLlm({ providers, routes, defaultProvider: env.LLM_DEFAULT_PROVIDER, tiers: env.LLM_TIERS });
 }

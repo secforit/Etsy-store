@@ -149,7 +149,9 @@ export async function main(argv: readonly string[], ctx: CliContext = { io: cons
     }
 
     case 'check-cloud': {
-      const env = getEnv();
+      // Parsed as in mock mode: the check reports missing cloud keys itself and must run before the Etsy, Printify
+      // and Marker keys are filled in (formats are still validated).
+      const env = ctx.env ?? loadEnv({ ...scopeEnvForLoad(ctx.rawEnv ?? process.env), MODE: 'mock' });
       const res = await checkCloud(env);
       printCloudCheck(io, env, loadOrchestratorEnv(ctx.rawEnv ?? process.env), res);
       return res.ok ? 0 : 1;
