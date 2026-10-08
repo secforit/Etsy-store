@@ -6,6 +6,7 @@
  *    are recorded with cost 0, so they never move the spend total and local jobs are never held back.
  * Gated jobs simply stay queued; they are not claimed, so they do not use up attempts.
  */
+import { CLOUD_LLM_PROVIDERS, llmProviderFor, type ImagegenProviderName, type LlmProviderName } from '../config/env.ts';
 import type { Queryable } from '../db/db.ts';
 import { AGENT_NAMES, JOB_KINDS, type AgentName, type JobKind, type Settings } from '../domain/types.ts';
 import { countDraftsSince, getSettings, spendSince } from './repo.ts';
@@ -64,18 +65,20 @@ export async function checkCaps(q: Queryable, now: Date, cloudAgents: readonly A
 
 /**
  * Agents that spend cloud money for the given config: LLM routed to a cloud provider (mirrors llm/router.ts
- * selection), plus the Designer when images come from the optional cloud fallback (IMAGEGEN_PROVIDER=recraft).
+ * selection), the Designer when images come from a cloud API (Recraft, fal), and QA & Publisher when print files
+ * are upscaled in the cloud (fal).
  */
 export function cloudAgentsFor(env: {
   MODE: 'mock' | 'live';
-  LLM_DEFAULT_PROVIDER: 'ollama' | 'anthropic';
-  LLM_ROUTES: Record<string, 'ollama' | 'anthropic'>;
-  IMAGEGEN_PROVIDER?: 'local' | 'recraft';
+  LLM_DEFAULT_PROVIDER: LlmProviderName;
+  LLM_ROUTES: Record<string, LlmProviderName>;
+  IMAGEGEN_PROVIDER?: ImagegenProviderName;
 }): AgentName[] {
   if (env.MODE === 'mock') return [];
   return AGENT_NAMES.filter(
     (a) =>
-      (env.LLM_ROUTES[a] ?? env.LLM_DEFAULT_PROVIDER) === 'anthropic' ||
-      (a === 'designer' && env.IMAGEGEN_PROVIDER === 'recraft'),
+      CLOUD_LLM_PROVIDERS.includes(llmProviderFor(env, a)) ||
+      (a === 'designer' && (env.IMAGEGEN_PROVIDER === 'recraft' || env.IMAGEGEN_PROVIDER === 'fal')) ||
+      (a === 'qa_publisher' && env.IMAGEGEN_PROVIDER === 'fal'),
   );
 }

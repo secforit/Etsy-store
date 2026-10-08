@@ -1,11 +1,12 @@
 /**
  * RoutedLlm: picks the provider per agent from env.LLM_ROUTES[agent] ?? env.LLM_DEFAULT_PROVIDER.
- * Default for every agent: 'ollama' (local GPU).
+ * Default for every agent: 'ollama' (local GPU); 'anthropic' and 'nous' are cloud APIs.
  */
+import type { LlmProviderName } from '../config/env.ts';
 import type { AgentName } from '../domain/types.ts';
 import { LlmError, type LlmClient, type LlmRequest, type LlmResponse } from './types.ts';
 
-export type LlmProvider = 'ollama' | 'anthropic';
+export type LlmProvider = LlmProviderName;
 
 export interface RoutedLlmOptions {
   providers: Partial<Record<LlmProvider, LlmClient>>;

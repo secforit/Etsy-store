@@ -11,7 +11,7 @@
 
 /** Keys (and key families) defined by the core env schema. Secrets among them may come from *_FILE. */
 const CORE_KEY_RE =
-  /^(?:MODE|LOG_LEVEL|DATABASE_URL|PGLITE_DIR|STORAGE_DIR|(?:LLM|OLLAMA|ANTHROPIC|IMAGEGEN|ETSY|PRINTIFY|MARKER|RECRAFT|IDEOGRAM|PINTEREST|DESK)_[A-Z0-9_]+)$/;
+  /^(?:MODE|LOG_LEVEL|DATABASE_URL|PGLITE_DIR|STORAGE_DIR|(?:LLM|OLLAMA|ANTHROPIC|NOUS|IMAGEGEN|ETSY|PRINTIFY|MARKER|RECRAFT|FAL|IDEOGRAM|PINTEREST|DESK)_[A-Z0-9_]+)$/;
 
 export function isCoreEnvKey(key: string): boolean {
   return CORE_KEY_RE.test(key) && !key.endsWith('_FILE');

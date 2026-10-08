@@ -31,6 +31,19 @@ describe('loadEnv scopes (least-privilege containers)', () => {
     expect(() => loadEnv({ MODE: 'live' }, { scope: 'database' })).toThrow(/DATABASE_URL is required/);
   });
 
+  it('an all-cloud worker (Nous + fal) needs their keys instead of the GPU sidecar token', () => {
+    const base = { ...deskOnly, MARKER_API_USERNAME: 'u', MARKER_API_PASSWORD: 'p', LLM_DEFAULT_PROVIDER: 'nous', IMAGEGEN_PROVIDER: 'fal' };
+    expect(() => loadEnv(base)).toThrow(/NOUS_API_KEY.*NOUS_MODEL_LARGE.*NOUS_MODEL_SMALL.*NOUS_MODEL_VISION.*FAL_KEY/);
+    const env = loadEnv({ ...base, NOUS_API_KEY: 'k', NOUS_MODEL_LARGE: 'a/large', NOUS_MODEL_SMALL: 'a/small', NOUS_MODEL_VISION: 'a/vl', FAL_KEY: 'f' });
+    expect(env.IMAGEGEN_TOKEN).toBeUndefined();
+    expect(env.NOUS_BASE_URL).toBe('https://inference-api.nousresearch.com/v1');
+    // The vision model is needed only when an image-sending agent is routed to Nous.
+    const textOnly = { ...base, LLM_DEFAULT_PROVIDER: 'ollama', LLM_ROUTES: '{"analyst":"nous"}', NOUS_API_KEY: 'k', NOUS_MODEL_LARGE: 'a', NOUS_MODEL_SMALL: 'b', FAL_KEY: 'f' };
+    expect(() => loadEnv(textOnly)).not.toThrow();
+    expect(() => loadEnv({ ...textOnly, LLM_ROUTES: '{"qa_publisher":"nous"}' })).toThrow(/NOUS_MODEL_VISION/);
+    expect(() => loadEnv({ ...textOnly, LLM_ROUTES: '{"analyst":"openai"}' })).toThrow(/LLM_ROUTES must be JSON/);
+  });
+
   it('error messages carry key names, never values', () => {
     try {
       loadEnv({ ...deskOnly, MARKER_API_PASSWORD: 'hunter2-secret' });

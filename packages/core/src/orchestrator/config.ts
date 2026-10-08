@@ -4,6 +4,7 @@
  * .env.example.
  */
 import { z } from 'zod';
+import { usesLlmProvider, type LlmProviderName } from '../config/env.ts';
 
 const emptyToUndefined = (v: unknown) => (typeof v === 'string' && v.trim() === '' ? undefined : v);
 
@@ -27,13 +28,21 @@ const OrchestratorEnvSchema = z.object({
    * Local FLUX.2 klein images cost 0. Set it to your Recraft plan's price.
    */
   RECRAFT_COST_PER_IMAGE_USD: z.preprocess(emptyToUndefined, z.coerce.number().min(0).max(10).default(0.08)),
+  /**
+   * IMAGEGEN_PROVIDER=fal: USD per call, recorded in agent_runs so the daily cloud spend cap sees them. The
+   * defaults are deliberately above fal's list prices (over-counting only pauses cloud jobs early); set them to
+   * the prices on your fal account for accurate cost-per-listing numbers.
+   */
+  FAL_COST_PER_IMAGE_USD: z.preprocess(emptyToUndefined, z.coerce.number().min(0).max(10).default(0.02)),
+  FAL_COST_PER_BACKGROUND_REMOVAL_USD: z.preprocess(emptyToUndefined, z.coerce.number().min(0).max(10).default(0.01)),
+  FAL_COST_PER_UPSCALE_USD: z.preprocess(emptyToUndefined, z.coerce.number().min(0).max(10).default(0.02)),
 });
 
 export type OrchestratorEnv = z.infer<typeof OrchestratorEnvSchema>;
 
 /** Keys (and key families) defined by config/env.ts. Only these may be filled from a FOO_FILE Docker secret. */
 const CORE_ENV_KEY_RE =
-  /^(?:MODE|LOG_LEVEL|DATABASE_URL|PGLITE_DIR|STORAGE_DIR|(?:LLM|OLLAMA|ANTHROPIC|IMAGEGEN|ETSY|PRINTIFY|MARKER|RECRAFT|IDEOGRAM|PINTEREST|DESK)_[A-Z0-9_]+)$/;
+  /^(?:MODE|LOG_LEVEL|DATABASE_URL|PGLITE_DIR|STORAGE_DIR|(?:LLM|OLLAMA|ANTHROPIC|NOUS|IMAGEGEN|ETSY|PRINTIFY|MARKER|RECRAFT|FAL|IDEOGRAM|PINTEREST|DESK)_[A-Z0-9_]+)$/;
 
 /**
  * Copy of the environment for loadEnv() without unrelated *_FILE variables. loadEnv reads EVERY FOO_FILE as a
@@ -59,16 +68,17 @@ export function scopeEnvForLoad(source: Readonly<Record<string, string | undefin
 export function cloudModelsWithoutPrice(
   env: {
     MODE: 'mock' | 'live';
-    LLM_DEFAULT_PROVIDER: 'ollama' | 'anthropic';
-    LLM_ROUTES: Record<string, 'ollama' | 'anthropic'>;
+    LLM_DEFAULT_PROVIDER: LlmProviderName;
+    LLM_ROUTES: Record<string, LlmProviderName>;
     ANTHROPIC_MODEL_LARGE?: string | undefined;
     ANTHROPIC_MODEL_SMALL?: string | undefined;
   },
   raw: Record<string, string | undefined>,
 ): string[] {
+  // Nous models are priced from the Portal's own catalog at run time (llm/nousPrices.ts), so only Anthropic
+  // model ids need an entry here.
   if (env.MODE !== 'live') return [];
-  const usesAnthropic = env.LLM_DEFAULT_PROVIDER === 'anthropic' || Object.values(env.LLM_ROUTES).includes('anthropic');
-  if (!usesAnthropic) return [];
+  if (!usesLlmProvider(env, 'anthropic')) return [];
   let table: Record<string, unknown> = {};
   try {
     const parsed: unknown = raw.LLM_PRICES_JSON ? JSON.parse(raw.LLM_PRICES_JSON) : {};

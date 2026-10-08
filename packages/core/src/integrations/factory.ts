@@ -2,16 +2,18 @@
  * Builds the integrations bundle.
  * MODE=mock -> deterministic offline mocks (blobs on disk under STORAGE_DIR so the desk can show them).
  * MODE=live -> live clients: Etsy (OAuth refresh), Printify, Marker, trend sources, filesystem storage,
- *              GPU coordinator (Ollama + imagegen sidecar on one RTX 3060), image generation from
- *              IMAGEGEN_PROVIDER (local sidecar by default, Recraft optional), sidecar upscaler when configured.
+ *              GPU coordinator (Ollama + imagegen sidecar on one RTX 3060, whichever this config runs), image
+ *              generation from IMAGEGEN_PROVIDER (local sidecar by default; fal or Recraft in the cloud), and the
+ *              upscaler that goes with it (sidecar Real-ESRGAN, fal Real-ESRGAN, or none = sharp-only resize).
  *              With `scope: 'desk'` only Etsy, Printify, storage and image tools (the desk holds no other keys).
  * Secrets are read from `env` only and never logged.
  */
 import path from 'node:path';
 import pino from 'pino';
-import type { Env } from '../config/env.ts';
+import { usesLlmProvider, type Env } from '../config/env.ts';
 import type { Logger } from '../orchestrator/contracts.ts';
 import { EtsyTokenManager, FileRefreshTokenStore, LiveEtsyClient } from './etsy.ts';
+import { FalImageGenClient, FalUpscaler } from './fal.ts';
 import { createAllowlistedImageFetcher } from './fetchImage.ts';
 import { OllamaAdmin, OllamaAwareGpuCoordinator } from './gpu.ts';
 import type { FetchLike } from './http.ts';
@@ -23,7 +25,7 @@ import { RecraftImageGenClient } from './recraft.ts';
 import { FileBlobStorage } from './storage.ts';
 import { LiveTrademarkClient } from './trademark.ts';
 import { EtsySearchTrendSource, PinterestTrendSource, SeasonalTrendSource } from './trends.ts';
-import type { BlobStorage, GpuCoordinator, ImageGenClient, Integrations, TrademarkClient } from './types.ts';
+import type { BlobStorage, GpuCoordinator, ImageGenClient, ImageUpscaler, Integrations, TrademarkClient } from './types.ts';
 
 export interface CreateIntegrationsOptions {
   logger?: Logger;
@@ -137,20 +139,26 @@ export async function createIntegrations(env: Env, opts: CreateIntegrationsOptio
     logger,
   });
 
-  const sidecar = env.IMAGEGEN_TOKEN
-    ? new ImagegenSidecar({ baseUrl: env.IMAGEGEN_BASE_URL, token: env.IMAGEGEN_TOKEN, fetch: fetchImpl, logger })
-    : null;
-  const usesOllama =
-    env.LLM_DEFAULT_PROVIDER === 'ollama' || Object.values(env.LLM_ROUTES).some((p) => p === 'ollama');
+  // The GPU sidecar exists only when this configuration runs it: local art, or Recraft art upscaled by the sidecar.
+  // With fal, art, backgrounds and upscaling all run in the cloud and the sidecar is not deployed.
+  const sidecar =
+    env.IMAGEGEN_TOKEN && env.IMAGEGEN_PROVIDER !== 'fal'
+      ? new ImagegenSidecar({ baseUrl: env.IMAGEGEN_BASE_URL, token: env.IMAGEGEN_TOKEN, fetch: fetchImpl, logger })
+      : null;
   const gpu = new OllamaAwareGpuCoordinator({
-    ollama: usesOllama ? new OllamaAdmin({ baseUrl: env.OLLAMA_BASE_URL, fetch: fetchImpl, logger }) : null,
+    ollama: usesLlmProvider(env, 'ollama') ? new OllamaAdmin({ baseUrl: env.OLLAMA_BASE_URL, fetch: fetchImpl, logger }) : null,
     imagegen: sidecar,
     logger,
   });
 
   let imageGen: ImageGenClient;
+  let upscaler: ImageUpscaler | null = sidecar ? new LocalUpscaler(sidecar, gpu) : null;
   if (env.IMAGEGEN_PROVIDER === 'recraft') {
     imageGen = new RecraftImageGenClient({ apiKey: required(env.RECRAFT_API_KEY, 'RECRAFT_API_KEY'), fetch: fetchImpl, logger });
+  } else if (env.IMAGEGEN_PROVIDER === 'fal') {
+    const falOpts = { apiKey: required(env.FAL_KEY, 'FAL_KEY'), fetch: fetchImpl, mediaFetch: fetchImpl, logger };
+    imageGen = new FalImageGenClient(falOpts);
+    upscaler = new FalUpscaler(falOpts);
   } else {
     if (!sidecar) throw new Error('createIntegrations: IMAGEGEN_TOKEN is required for IMAGEGEN_PROVIDER=local');
     imageGen = new LocalImageGenClient(sidecar, gpu);
@@ -169,7 +177,7 @@ export async function createIntegrations(env: Env, opts: CreateIntegrationsOptio
     storage: opts.storage ?? new FileBlobStorage(env.STORAGE_DIR),
     imageTools: new SharpImageTools(),
     gpu,
-    upscaler: sidecar ? new LocalUpscaler(sidecar, gpu) : null,
+    upscaler,
     fetchImage: createAllowlistedImageFetcher({ fetch: fetchImpl }),
   };
 }

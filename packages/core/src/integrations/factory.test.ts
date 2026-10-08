@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { loadEnv } from '../config/env.ts';
 import { LiveEtsyClient } from './etsy.ts';
 import { createIntegrations, etsyRefreshTokenPath } from './factory.ts';
+import { FalImageGenClient, FalUpscaler } from './fal.ts';
 import { MockGpuCoordinator, OllamaAwareGpuCoordinator } from './gpu.ts';
 import { LocalImageGenClient, LocalUpscaler } from './imagegen.ts';
 import { MockEtsyClient } from './mocks/etsy.ts';
@@ -70,6 +71,25 @@ describe('createIntegrations', () => {
     const i = await createIntegrations(liveEnv({ IMAGEGEN_PROVIDER: 'recraft', RECRAFT_API_KEY: 'rk' }), { logger: noopLogger });
     expect(i.imageGen).toBeInstanceOf(RecraftImageGenClient);
     expect(i.upscaler).toBeInstanceOf(LocalUpscaler);
+  });
+
+  it('IMAGEGEN_PROVIDER=fal runs art and upscaling on fal; the GPU sidecar is never called, even with a token set', async () => {
+    const fetch = stubFetch(() => new Response(null, { status: 204 }));
+    const env = liveEnv({
+      IMAGEGEN_PROVIDER: 'fal',
+      FAL_KEY: 'fk',
+      LLM_DEFAULT_PROVIDER: 'nous',
+      NOUS_API_KEY: 'nk',
+      NOUS_MODEL_LARGE: 'a/large',
+      NOUS_MODEL_SMALL: 'a/small',
+      NOUS_MODEL_VISION: 'a/vl',
+    });
+    const i = await createIntegrations(env, { fetch, logger: noopLogger });
+    expect(i.imageGen).toBeInstanceOf(FalImageGenClient);
+    expect(i.upscaler).toBeInstanceOf(FalUpscaler);
+    await i.gpu.withGpu('image', async () => undefined);
+    await i.gpu.withGpu('llm', async () => undefined);
+    expect(fetch.calls).toHaveLength(0); // no Ollama unload, no sidecar /unload: nothing local is deployed
   });
 
   it('live GPU coordinator skips Ollama when every agent runs on Anthropic', async () => {

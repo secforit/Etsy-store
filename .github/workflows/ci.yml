@@ -77,5 +77,12 @@ jobs:
           for f in .env .env.worker .env.desk; do cp "$f.example" "$f"; done
           chmod 600 .env .env.worker .env.desk
           sed -i 's/^POSTGRES_PASSWORD=$/POSTGRES_PASSWORD=ci-not-a-secret/' .env
-          sed -i 's/^IMAGEGEN_TOKEN=$/IMAGEGEN_TOKEN=ci-not-a-secret/' .env.worker
+          sed -i 's/^IMAGEGEN_TOKEN=$/IMAGEGEN_TOKEN=ci-not-a-secret-0123456789abcdef/' .env.worker
           ./deploy/compose.sh --profile setup config --quiet
+      - name: Validate an all-cloud setup (Nous + fal, no GPU services, no sidecar token)
+        run: |
+          sed -i 's/^LLM_DEFAULT_PROVIDER=.*/LLM_DEFAULT_PROVIDER=nous/; s/^IMAGEGEN_PROVIDER=.*/IMAGEGEN_PROVIDER=fal/; s/^IMAGEGEN_TOKEN=.*/# IMAGEGEN_TOKEN=/' .env.worker
+          test -z "$(./deploy/profiles.sh)"
+          services="$(./deploy/compose.sh config --services)"
+          echo "$services"
+          ! grep -qx -e ollama -e imagegen <<<"$services"
