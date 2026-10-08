@@ -1,0 +1,81 @@
+# Checks every push to main and every pull request. No secrets, no network calls from the tests
+# (mocks and PGlite), no GPU: the sidecar tests use fake pipelines.
+# Third-party actions are pinned by commit SHA (tag in the trailing comment), like the images in deploy/.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node:
+    name: TypeScript (core, worker, desk)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      NEXT_TELEMETRY_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - name: Offline demo (full pipeline on mocks)
+        run: npm run demo
+        env:
+          MODE: mock
+      - name: Build the desk (no secrets)
+        run: npx next build
+        working-directory: apps/desk
+        env:
+          MODE: mock
+
+  imagegen:
+    name: imagegen sidecar (pytest, fake pipelines)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: apps/imagegen
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: '0.12.23' # same uv as apps/imagegen/Dockerfile
+      - run: uv venv --python 3.12
+      - run: uv pip install -e '.[dev]'
+      - run: .venv/bin/python -m pytest -q
+
+  deploy:
+    name: Deploy scripts and Compose file
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: shellcheck deploy/*.sh
+      - name: Validate docker-compose.yml against the env templates
+        # Same steps as docs/RUNBOOK.md section 4, with throwaway values; also runs deploy/check-env.sh.
+        run: |
+          for f in .env .env.worker .env.desk; do cp "$f.example" "$f"; done
+          chmod 600 .env .env.worker .env.desk
+          sed -i 's/^POSTGRES_PASSWORD=$/POSTGRES_PASSWORD=ci-not-a-secret/' .env
+          sed -i 's/^IMAGEGEN_TOKEN=$/IMAGEGEN_TOKEN=ci-not-a-secret/' .env.worker
+          ./deploy/compose.sh --profile setup config --quiet
