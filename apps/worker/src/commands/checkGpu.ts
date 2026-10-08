@@ -3,12 +3,12 @@
  * whether it is up (`GET /healthz`, bearer token), then prints what is missing and how to fix it.
  * Plain HTTP on the private Docker network only; never prints the token.
  */
-import type { Env } from '@etsy-agents/core/config/env.ts';
+import { usesLlmProvider, type Env } from '@etsy-agents/core/config/env.ts';
 import type { Io } from '../io.ts';
 
 export interface GpuCheckResult {
   ok: boolean;
-  ollama: { reachable: boolean; models: string[]; missing: string[]; loaded: string[] };
+  ollama: { required: boolean; reachable: boolean; models: string[]; missing: string[]; loaded: string[] };
   imagegen: { required: boolean; reachable: boolean; ok: boolean; loaded: string[]; error: string | null };
 }
 
@@ -20,9 +20,7 @@ export function normaliseModel(name: string): string {
   return n.includes(':') ? n : `${n}:latest`;
 }
 
-function usesOllama(env: Env): boolean {
-  return env.LLM_DEFAULT_PROVIDER === 'ollama' || Object.values(env.LLM_ROUTES).includes('ollama');
-}
+const usesOllama = (env: Env): boolean => usesLlmProvider(env, 'ollama');
 
 async function getJson(fetchImpl: FetchLike, url: string, headers: Record<string, string>, timeoutMs: number): Promise<unknown> {
   const res = await fetchImpl(url, { headers: { accept: 'application/json', ...headers }, signal: AbortSignal.timeout(timeoutMs) });
@@ -43,18 +41,22 @@ function names(body: unknown): string[] {
 
 export async function checkGpu(env: Env, fetchImpl: FetchLike = fetch, timeoutMs = 10_000): Promise<GpuCheckResult> {
   const base = env.OLLAMA_BASE_URL.replace(/\/+$/, '');
-  const wanted = usesOllama(env) ? [...new Set([env.OLLAMA_MODEL_LARGE, env.OLLAMA_MODEL_SMALL, env.OLLAMA_MODEL_VISION])] : [];
-  const ollama: GpuCheckResult['ollama'] = { reachable: false, models: [], missing: [], loaded: [] };
-  try {
-    ollama.models = names(await getJson(fetchImpl, `${base}/api/tags`, {}, timeoutMs));
-    ollama.reachable = true;
+  const ollamaUsed = usesOllama(env);
+  const wanted = ollamaUsed ? [...new Set([env.OLLAMA_MODEL_LARGE, env.OLLAMA_MODEL_SMALL, env.OLLAMA_MODEL_VISION])] : [];
+  const ollama: GpuCheckResult['ollama'] = { required: ollamaUsed, reachable: false, models: [], missing: [], loaded: [] };
+  // No agent routes to Ollama (cloud LLMs): its container is not even deployed, so it is not asked.
+  if (ollamaUsed) {
     try {
-      ollama.loaded = names(await getJson(fetchImpl, `${base}/api/ps`, {}, timeoutMs));
+      ollama.models = names(await getJson(fetchImpl, `${base}/api/tags`, {}, timeoutMs));
+      ollama.reachable = true;
+      try {
+        ollama.loaded = names(await getJson(fetchImpl, `${base}/api/ps`, {}, timeoutMs));
+      } catch {
+        /* optional */
+      }
     } catch {
-      /* optional */
+      ollama.reachable = false;
     }
-  } catch {
-    ollama.reachable = false;
   }
   const have = new Set(ollama.models.map(normaliseModel));
   ollama.missing = ollama.reachable ? wanted.filter((m) => !have.has(normaliseModel(m))) : wanted;
@@ -86,15 +88,19 @@ export async function checkGpu(env: Env, fetchImpl: FetchLike = fetch, timeoutMs
 }
 
 export function printGpuCheck(io: Io, env: Env, r: GpuCheckResult): void {
-  io.out(`Ollama   ${env.OLLAMA_BASE_URL}: ${r.ollama.reachable ? 'reachable' : 'NOT reachable'}`);
-  if (r.ollama.reachable) {
-    io.out(`  models on disk : ${r.ollama.models.join(', ') || 'none'}`);
-    io.out(`  loaded in VRAM : ${r.ollama.loaded.join(', ') || 'none'}`);
+  if (!r.ollama.required) {
+    io.out(`Ollama   : not used (no agent routes to it; LLM_DEFAULT_PROVIDER=${env.LLM_DEFAULT_PROVIDER})`);
+  } else {
+    io.out(`Ollama   ${env.OLLAMA_BASE_URL}: ${r.ollama.reachable ? 'reachable' : 'NOT reachable'}`);
+    if (r.ollama.reachable) {
+      io.out(`  models on disk : ${r.ollama.models.join(', ') || 'none'}`);
+      io.out(`  loaded in VRAM : ${r.ollama.loaded.join(', ') || 'none'}`);
+    }
+    for (const m of r.ollama.missing) {
+      io.out(`  MISSING model ${m}: ./deploy/compose.sh exec ollama ollama pull ${m}`);
+    }
+    if (!r.ollama.reachable) io.out('  Check: ./deploy/compose.sh ps ollama && ./deploy/compose.sh logs --tail 50 ollama');
   }
-  for (const m of r.ollama.missing) {
-    io.out(`  MISSING model ${m}: ./deploy/compose.sh exec ollama ollama pull ${m}`);
-  }
-  if (!r.ollama.reachable) io.out('  Check: ./deploy/compose.sh ps ollama && ./deploy/compose.sh logs --tail 50 ollama');
   if (r.imagegen.required) {
     io.out(`Imagegen ${env.IMAGEGEN_BASE_URL}: ${r.imagegen.ok ? 'ok' : `NOT ready (${r.imagegen.error ?? 'unknown'})`}`);
     if (r.imagegen.reachable) io.out(`  loaded models  : ${r.imagegen.loaded.join(', ') || 'none (lazy-loaded on first request)'}`);

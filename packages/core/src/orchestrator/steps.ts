@@ -29,7 +29,7 @@ import {
   type Product,
   type ProductState,
 } from '../domain/types.ts';
-import type { TrendSignalInput } from '../integrations/types.ts';
+import type { ImageGenClient, ImageUpscaler, TrendSignalInput } from '../integrations/types.ts';
 import { LlmError, type LlmClient, type LlmRequest, type LlmResponse, type LlmUsage } from '../llm/types.ts';
 import { auditExternalWrite } from './audit.ts';
 import { latestAvoidRules } from './avoidRules.ts';
@@ -67,17 +67,41 @@ export interface StepOptions {
   /** Max trend signals kept per scan. */
   maxSignalsPerScan: number;
   /**
-   * USD per generated image when images come from a cloud provider (IMAGEGEN_PROVIDER=recraft); 0 for the local
-   * FLUX.2 klein sidecar. Recorded as a designer agent_run so the daily cloud spend cap counts it.
+   * USD per generated image when images come from a cloud provider (IMAGEGEN_PROVIDER=recraft or fal); 0 for the
+   * local FLUX.2 klein sidecar. Recorded as a designer agent_run so the daily cloud spend cap counts it.
    */
   imageGenCostUsd: number;
+  /** Extra USD per generated image whose background was removed in the cloud (fal BiRefNet); 0 otherwise. */
+  imageBackgroundCostUsd: number;
+  /** USD per cloud upscale (fal Real-ESRGAN); 0 for the local sidecar or sharp. Recorded as a qa_publisher agent_run. */
+  upscaleCostUsd: number;
 }
 
 export const DEFAULT_STEP_OPTIONS: StepOptions = {
   reportIntervalMs: 24 * 3600_000,
   maxSignalsPerScan: 300,
   imageGenCostUsd: 0,
+  imageBackgroundCostUsd: 0,
+  upscaleCostUsd: 0,
 };
+
+/**
+ * Cloud image work (generation, background removal, upscaling) is paid per call. Recorded as an agent_run so the
+ * daily spend cap counts it, also when the step fails after the call. A failed insert is logged, never thrown, so
+ * it cannot hide the step's own error.
+ */
+async function recordImageCost(ctx: StepContext, agent: 'designer' | 'qa_publisher', model: string, costUsd: number): Promise<void> {
+  if (!(costUsd > 0)) return;
+  try {
+    await insertAgentRun(
+      ctx.deps.db,
+      { jobId: ctx.job.id, agent, usage: { model, inputTokens: 0, outputTokens: 0, costUsd, durationMs: 0 }, ok: true },
+      ctx.deps.now(),
+    );
+  } catch (err) {
+    ctx.deps.logger.error({ agent, model, costUsd, err: errorMessage(err) }, 'could not record cloud image cost');
+  }
+}
 
 export interface StepResult {
   status: 'done' | 'skipped';
@@ -546,42 +570,45 @@ const design: StepHandler = async (ctx) => {
   const { product, niche } = loaded;
   const { db, integrations, agents } = ctx.deps;
   const [settings, avoidRules, existing] = await Promise.all([getSettings(db), latestAvoidRules(db), getDesign(db, product.id)]);
+  // Meter cloud image calls (Recraft, fal): each successful generation is paid, whatever happens next.
+  let imageCostUsd = 0;
+  let imageModel = 'unknown';
+  const imageGen: ImageGenClient = {
+    async generate(req) {
+      const img = await integrations.imageGen.generate(req);
+      imageCostUsd += ctx.options.imageGenCostUsd + (req.transparentBackground ? ctx.options.imageBackgroundCostUsd : 0);
+      imageModel = img.model;
+      return img;
+    },
+  };
   const designerDeps = {
     ...baseDeps(ctx),
-    imageGen: integrations.imageGen,
+    imageGen,
     storage: integrations.storage,
     blocklist: settings.blocklist,
     printify: integrations.printify,
   };
-  const out = await ctx.runAgent('designer', DesignerOutputSchema, () =>
-    agents.designer(
-      {
-        productId: product.id,
-        productType: product.productType,
-        conceptTitle: product.conceptTitle,
-        designPhrase: product.designPhrase,
-        styleNotes: product.styleNotes,
-        nicheBrief: niche.brief,
-        avoidRules,
-        qaNotes: existing?.qaNotes ?? [],
-      },
-      designerDeps,
-    ),
-  );
-  assertDesignKey(out.artKey, product.id);
-  if (ctx.options.imageGenCostUsd > 0) {
-    // Cloud image generation (Recraft fallback) is paid per image: record it so the spend cap sees it.
-    await insertAgentRun(
-      db,
-      {
-        jobId: ctx.job.id,
-        agent: 'designer',
-        usage: { model: `image:${out.model}`, inputTokens: 0, outputTokens: 0, costUsd: ctx.options.imageGenCostUsd, durationMs: 0 },
-        ok: true,
-      },
-      ctx.deps.now(),
+  let out;
+  try {
+    out = await ctx.runAgent('designer', DesignerOutputSchema, () =>
+      agents.designer(
+        {
+          productId: product.id,
+          productType: product.productType,
+          conceptTitle: product.conceptTitle,
+          designPhrase: product.designPhrase,
+          styleNotes: product.styleNotes,
+          nicheBrief: niche.brief,
+          avoidRules,
+          qaNotes: existing?.qaNotes ?? [],
+        },
+        designerDeps,
+      ),
     );
+  } finally {
+    await recordImageCost(ctx, 'designer', `image:${imageModel}`, imageCostUsd);
   }
+  assertDesignKey(out.artKey, product.id);
   await ctx.commit(async (q) => {
     const now = ctx.deps.now();
     await q.query(
@@ -782,12 +809,24 @@ const qaPublish: StepHandler = async (ctx) => {
   const designRow = await requireDesign(ctx, product.id, true);
   const listing = await requireListing(ctx, product.id);
   const qa = ctx.options.qaPublish ?? {};
+  // Meter cloud upscales (fal): each one is paid, whatever happens next.
+  let upscales = 0;
+  const cloudUpscaler = ctx.options.upscaleCostUsd > 0 ? integrations.upscaler : null;
+  const upscaler: ImageUpscaler | null = cloudUpscaler
+    ? {
+        async upscale(bytes, factor) {
+          const r = await cloudUpscaler.upscale(bytes, factor);
+          upscales++;
+          return r;
+        },
+      }
+    : integrations.upscaler;
   const qaDeps = {
     ...baseDeps(ctx),
     printify: integrations.printify,
     storage: integrations.storage,
     imageTools: integrations.imageTools,
-    upscaler: integrations.upscaler,
+    upscaler,
     fetchImage: integrations.fetchImage,
     // Last try of this job: mockups that still cannot be checked fail QA instead of being retried.
     finalAttempt: ctx.job.attempts >= ctx.job.maxAttempts,
@@ -839,6 +878,8 @@ const qaPublish: StepHandler = async (ctx) => {
       });
     }
     throw err;
+  } finally {
+    await recordImageCost(ctx, 'qa_publisher', 'image:upscale', upscales * ctx.options.upscaleCostUsd);
   }
 
   if (out.status === 'drafted') {

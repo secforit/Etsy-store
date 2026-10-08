@@ -26,6 +26,9 @@
 #
 # GPU: only `ollama` and `imagegen` reserve the GPU. They never hold VRAM at the same time: the worker's
 # GpuCoordinator unloads one before using the other, and Ollama keeps at most one model loaded.
+# Each sits in a profile of its own name and runs only when the configuration uses it: deploy/compose.sh sets
+# COMPOSE_PROFILES from deploy/profiles.sh (Ollama when an agent routes to it; imagegen for local art). With the
+# cloud providers (LLM on Nous or Anthropic, IMAGEGEN_PROVIDER=fal) neither runs and the host needs no GPU.
 #
 # Images: third-party images are pinned by version AND digest; update them deliberately (docs/RUNBOOK.md,
 # "Updating"). Memory and PID limits keep one runaway service (e.g. the sidecar) from taking the host down.
@@ -112,6 +115,7 @@ services:
 
   ollama:
     image: *ollama-image
+    profiles: [ollama]
     user: "1000:1000"
     restart: unless-stopped
     depends_on:
@@ -189,12 +193,16 @@ services:
 
   # FLUX.2 [klein] 4B + BiRefNet + Real-ESRGAN sidecar (apps/imagegen). Bearer token required on every route.
   imagegen:
+    profiles: [imagegen]
     build:
       context: ../apps/imagegen
     image: etsy-agents/imagegen:local
     restart: unless-stopped
     environment:
-      IMAGEGEN_TOKEN: ${IMAGEGEN_TOKEN:?set IMAGEGEN_TOKEN in .env.worker (openssl rand -hex 32)}
+      # Compose interpolates every service, active or not, so the token is not `:?`-required here (a cloud-only
+      # setup has none). deploy/check-env.sh requires it whenever this profile runs, and the sidecar refuses to
+      # start without one.
+      IMAGEGEN_TOKEN: ${IMAGEGEN_TOKEN:-}
       HF_HOME: /models
       # Offline by default: the weights come from the one-shot `imagegen-download` (profile `setup`), and this
       # service has no internet access anyway (internal network only).
@@ -228,7 +236,7 @@ services:
     profiles: [setup]
     command: ["python", "-m", "imagegen.download"]
     environment:
-      IMAGEGEN_TOKEN: ${IMAGEGEN_TOKEN:?set IMAGEGEN_TOKEN in .env.worker (openssl rand -hex 32)}
+      IMAGEGEN_TOKEN: ${IMAGEGEN_TOKEN:-}
       HF_HOME: /models
       HF_HUB_OFFLINE: "0"
     env_file:
@@ -282,8 +290,10 @@ services:
         condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
+      # Only when the `ollama` profile runs (an agent routes to Ollama).
       ollama:
         condition: service_started
+        required: false
     env_file:
       - path: ../.env
         required: true

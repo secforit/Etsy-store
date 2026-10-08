@@ -253,7 +253,7 @@ export function createFakeIntegrations(): FakeIntegrations {
   ];
   const trademark: TrademarkClient = { search: async () => [] };
   const imageGen: ImageGenClient = {
-    generate: async (req) => ({ bytes: await makePng(Math.min(req.widthPx, 64), Math.min(req.heightPx, 64)), mimeType: 'image/png', model: 'fake-image', seed: 1 }),
+    generate: async (req) => ({ bytes: await makePng(Math.min(req.widthPx, 64), Math.min(req.heightPx, 64)), mimeType: 'image/png', model: 'fake-flux', seed: 7 }),
   };
   const imageTools: ImageTools = {
     inspect: async () => ({ format: 'png', widthPx: 64, heightPx: 64, dpi: 300, hasAlpha: true, colorSpace: 'srgb', semiTransparentShare: 0 }),
@@ -385,9 +385,12 @@ export function createFakeAgents(integrations: FakeIntegrations, overrides: Part
     },
     async designer(input: DesignerInput, deps) {
       record('designer', input, deps);
+      // Like the real Designer: one image per run, from the image client the step hands over (it meters cloud cost).
+      const prompt = `Flat vector art for ${input.conceptTitle}`;
+      const art = await deps.imageGen.generate({ prompt, style: 'vector_illustration', transparentBackground: input.productType !== 'poster', widthPx: 48, heightPx: 48 });
       const key = `designs/${input.productId}/art-1.png`;
-      await integrations.storage.put(key, await makePng(48, 48), 'image/png');
-      return { output: { prompt: `Flat vector art for ${input.conceptTitle}`, model: 'fake-flux', seed: 7, artKey: key }, llmUsage: u() };
+      await integrations.storage.put(key, art.bytes, 'image/png');
+      return { output: { prompt, model: art.model, seed: art.seed ?? 7, artKey: key }, llmUsage: u() };
     },
     async listingWriter(input: ListingWriterInput, deps) {
       record('listingWriter', input, deps);
@@ -403,6 +406,8 @@ export function createFakeAgents(integrations: FakeIntegrations, overrides: Part
       record('qaPublisher', input, deps);
       const n = qaCalls.get(input.productId) ?? 0;
       qaCalls.set(input.productId, n + 1);
+      // Like the real QA when the edit is below print size: upscale first (only when an upscaler is configured).
+      if (deps.upscaler) await deps.upscaler.upscale(await makePng(8, 8), 4);
       const outcome = behaviour.qa(input, n);
       if (outcome === 'pending') throw new PendingProductError(input.existingPrintifyProductId ?? `pf-${input.productId.slice(0, 8)}`);
       if (outcome === 'throw') throw new Error('printify fake: 502 bad gateway');

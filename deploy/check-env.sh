@@ -5,8 +5,8 @@
 #      DESK_*          .env.desk only (the desk)
 #      HF_TOKEN        .env.imagegen only (the one-shot imagegen-download)
 #      worker secrets  .env.worker only, never .env (the desk and migrate also read .env):
-#                      IMAGEGEN_TOKEN, MARKER_API_*, ANTHROPIC_API_KEY, RECRAFT_API_KEY, IDEOGRAM_API_KEY,
-#                      PINTEREST_ACCESS_TOKEN
+#                      IMAGEGEN_TOKEN, MARKER_API_*, ANTHROPIC_API_KEY, NOUS_API_KEY, RECRAFT_API_KEY, FAL_KEY,
+#                      IDEOGRAM_API_KEY, PINTEREST_ACCESS_TOKEN
 #      .env.desk holds DESK_* keys only; .env.imagegen holds HF_TOKEN only
 #  - OLLAMA_IMAGE, when set (env files or the shell), is pinned by digest
 # Prints key names only, never values. Exit code 1 lists every problem found.
@@ -15,7 +15,7 @@ set -euo pipefail
 
 ROOT="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
-WORKER_SECRETS=" IMAGEGEN_TOKEN MARKER_API_USERNAME MARKER_API_PASSWORD ANTHROPIC_API_KEY RECRAFT_API_KEY IDEOGRAM_API_KEY PINTEREST_ACCESS_TOKEN "
+WORKER_SECRETS=" IMAGEGEN_TOKEN MARKER_API_USERNAME MARKER_API_PASSWORD ANTHROPIC_API_KEY NOUS_API_KEY RECRAFT_API_KEY FAL_KEY IDEOGRAM_API_KEY PINTEREST_ACCESS_TOKEN "
 
 problems=0
 problem() {
@@ -83,6 +83,14 @@ for name in .env .env.worker; do
 done
 # The shell environment wins over the env files in compose interpolation.
 check_ollama_image "shell environment" "${OLLAMA_IMAGE:-}"
+
+# The local imagegen sidecar (profile `imagegen`, deploy/profiles.sh) needs its shared token; cloud setups do not.
+if [[ -f "$ROOT/.env.worker" && ",$("$(dirname "${BASH_SOURCE[0]}")/profiles.sh" "$ROOT")," == *",imagegen,"* ]]; then
+  token="$(value_of "$ROOT/.env.worker" IMAGEGEN_TOKEN)"
+  if ((${#token} < 24)); then
+    problem "IMAGEGEN_TOKEN in .env.worker is missing or shorter than 24 characters; the local imagegen sidecar needs it (openssl rand -hex 32)"
+  fi
+fi
 
 if ((problems > 0)); then
   echo "check-env: $problems problem(s); nothing was started. See docs/RUNBOOK.md, section 4." >&2

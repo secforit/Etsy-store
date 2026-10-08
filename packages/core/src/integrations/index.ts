@@ -1,6 +1,7 @@
 /** Barrel for the integrations area (implementations; interfaces live in ./types.ts). */
 export * from './etsy.ts';
 export * from './factory.ts';
+export * from './fal.ts';
 export * from './fetchImage.ts';
 export * from './gpu.ts';
 export * from './http.ts';

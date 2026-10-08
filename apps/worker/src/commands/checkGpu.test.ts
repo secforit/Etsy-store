@@ -60,6 +60,19 @@ describe('check-gpu', () => {
     expect(r.imagegen.error).toBe('IMAGEGEN_TOKEN is not set');
   });
 
+  it('asks nothing of the GPU services a cloud setup does not deploy, and calls that READY', async () => {
+    const { fn, seen } = stubFetch({});
+    const cloud = loadEnv({ MODE: 'mock', LLM_DEFAULT_PROVIDER: 'nous', IMAGEGEN_PROVIDER: 'fal' });
+    const r = await checkGpu(cloud, fn);
+    expect(seen).toEqual([]);
+    expect(r.ok).toBe(true);
+    const io = new MemoryIo();
+    printGpuCheck(io, cloud, r);
+    expect(io.text()).toMatch(/Ollama {3}: not used/);
+    expect(io.text()).toMatch(/Imagegen : not used \(IMAGEGEN_PROVIDER=fal\)/);
+    expect(io.text()).not.toMatch(/NOT reachable/);
+  });
+
   it('normalises untagged model names', () => {
     expect(normaliseModel('gemma4')).toBe('gemma4:latest');
     expect(normaliseModel('gemma4:12b')).toBe('gemma4:12b');

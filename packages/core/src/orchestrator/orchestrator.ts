@@ -62,6 +62,8 @@ export class Orchestrator {
       ...(options.reportIntervalMs !== undefined ? { reportIntervalMs: options.reportIntervalMs } : {}),
       ...(options.maxSignalsPerScan !== undefined ? { maxSignalsPerScan: options.maxSignalsPerScan } : {}),
       ...(options.imageGenCostUsd !== undefined ? { imageGenCostUsd: Math.max(0, options.imageGenCostUsd) } : {}),
+      ...(options.imageBackgroundCostUsd !== undefined ? { imageBackgroundCostUsd: Math.max(0, options.imageBackgroundCostUsd) } : {}),
+      ...(options.upscaleCostUsd !== undefined ? { upscaleCostUsd: Math.max(0, options.upscaleCostUsd) } : {}),
       ...(options.qaPublish ? { qaPublish: options.qaPublish } : {}),
     };
     this.handlers = { ...STEP_HANDLERS, ...(options.handlers ?? {}) };

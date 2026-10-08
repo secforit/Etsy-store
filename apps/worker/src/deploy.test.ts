@@ -63,6 +63,16 @@ describe('deploy: network exposure and limits (SEC-08, SEC-09)', () => {
     expect(compose).toMatch(/^ {2}backend:\n {4}internal: true$/m);
   });
 
+  it('runs the GPU services only in their own profiles, so a cloud-only host needs no GPU', () => {
+    expect(services.get('ollama')).toMatch(/^ {4}profiles: \[ollama\]$/m);
+    expect(services.get('imagegen')).toMatch(/^ {4}profiles: \[imagegen\]$/m);
+    // The worker waits for Ollama only when it runs.
+    expect(services.get('worker')).toMatch(/ {6}ollama:\n {8}condition: service_started\n {8}required: false\n/);
+    // Interpolation covers inactive services too, so the token must not be `:?`-required (check-env.sh does it).
+    expect(compose).not.toMatch(/IMAGEGEN_TOKEN:\?/);
+    expect(read('deploy/compose.sh')).toMatch(/COMPOSE_PROFILES="\$\("\$ROOT\/deploy\/profiles\.sh"/);
+  });
+
   it('runs every service with a read-only root filesystem, and long-running ones with memory and PID limits', () => {
     for (const [name, block] of services) {
       expect(block, name).toMatch(/^ {4}read_only: true$/m);
@@ -91,7 +101,7 @@ describe('deploy: secrets scoped per container (SEC-10)', () => {
 
   it('keeps worker and desk secrets out of the shared .env template', () => {
     const shared = read('.env.example');
-    for (const key of ['IMAGEGEN_TOKEN', 'MARKER_API_PASSWORD', 'ANTHROPIC_API_KEY', 'HF_TOKEN', 'DESK_SESSION_SECRET', 'DESK_PASSWORD_HASH']) {
+    for (const key of ['IMAGEGEN_TOKEN', 'MARKER_API_PASSWORD', 'ANTHROPIC_API_KEY', 'NOUS_API_KEY', 'FAL_KEY', 'HF_TOKEN', 'DESK_SESSION_SECRET', 'DESK_PASSWORD_HASH']) {
       expect(shared, key).not.toMatch(new RegExp(`^#?\\s*${key}=`, 'm'));
     }
     expect(read('.env.worker.example')).toMatch(/^IMAGEGEN_TOKEN=$/m);
@@ -155,6 +165,23 @@ describe.skipIf(process.platform !== 'linux')('deploy/check-env.sh', () => {
     expect(err).toContain('readable by group/others (mode 644)');
   });
 
+  it('keeps the cloud keys (Nous, fal) in .env.worker', () => {
+    setup({ ...good, '.env': `${good['.env']}NOUS_API_KEY=leaked-nous\nFAL_KEY=leaked-fal\n` });
+    const { code, err } = run();
+    expect(code).toBe(1);
+    expect(err).toContain('NOUS_API_KEY belongs in .env.worker');
+    expect(err).toContain('FAL_KEY belongs in .env.worker');
+    expect(err).not.toMatch(/leaked/);
+  });
+
+  it('requires IMAGEGEN_TOKEN only when the local imagegen sidecar runs', () => {
+    setup({ ...good, '.env.worker': 'MARKER_API_PASSWORD=m\n' });
+    expect(run().err).toContain('IMAGEGEN_TOKEN in .env.worker is missing');
+    rmSync(dir, { recursive: true, force: true });
+    setup({ ...good, '.env.worker': 'MARKER_API_PASSWORD=m\nLLM_DEFAULT_PROVIDER=nous\nIMAGEGEN_PROVIDER=fal\nNOUS_API_KEY=n\nFAL_KEY=f\n' });
+    expect(run()).toEqual({ code: 0, err: '' });
+  });
+
   it('refuses an OLLAMA_IMAGE override without a digest (env file or shell)', () => {
     setup({ ...good, '.env': `${good['.env']}OLLAMA_IMAGE='ollama/ollama:latest'\n` });
     expect(run().err).toContain('OLLAMA_IMAGE (.env) must be pinned by digest');
@@ -162,5 +189,38 @@ describe.skipIf(process.platform !== 'linux')('deploy/check-env.sh', () => {
     setup({ ...good, '.env': `${good['.env']}OLLAMA_IMAGE=ollama/ollama:0.35.1@sha256:${'0'.repeat(64)}\n` });
     expect(run().code).toBe(0);
     expect(run({ OLLAMA_IMAGE: 'ollama/ollama:0.35.1' }).err).toContain('OLLAMA_IMAGE (shell environment)');
+  });
+});
+
+describe.skipIf(process.platform !== 'linux')('deploy/profiles.sh', () => {
+  let dir: string;
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  function profiles(env: string, worker: string): string {
+    dir = mkdtempSync(path.join(tmpdir(), 'profiles-'));
+    writeFileSync(path.join(dir, '.env'), env);
+    writeFileSync(path.join(dir, '.env.worker'), worker);
+    const res = spawnSync('bash', [path.join(ROOT, 'deploy/profiles.sh'), dir], { encoding: 'utf8', env: { PATH: process.env.PATH ?? '/usr/bin:/bin' } });
+    expect(res.status).toBe(0);
+    return res.stdout.trim();
+  }
+
+  it('starts both GPU services for the default, all-local setup', () => {
+    expect(profiles('MODE=mock\n', `IMAGEGEN_TOKEN=${'a'.repeat(40)}\n`)).toBe('ollama,imagegen');
+  });
+
+  it('starts nothing on the GPU for Nous + fal', () => {
+    expect(profiles('', 'LLM_DEFAULT_PROVIDER=nous\nIMAGEGEN_PROVIDER="fal"\n# LLM_DEFAULT_PROVIDER=ollama\n')).toBe('');
+  });
+
+  it('starts only what a mixed setup uses', () => {
+    expect(profiles('', `LLM_DEFAULT_PROVIDER=nous\nLLM_ROUTES='{"analyst":"ollama"}'\nIMAGEGEN_PROVIDER=fal\n`)).toBe('ollama');
+    expect(profiles('', 'LLM_DEFAULT_PROVIDER=anthropic\nIMAGEGEN_PROVIDER=local\n')).toBe('imagegen');
+    expect(profiles('', `LLM_DEFAULT_PROVIDER=nous\nIMAGEGEN_PROVIDER=recraft\nIMAGEGEN_TOKEN=${'a'.repeat(40)}\n`)).toBe('imagegen');
+    expect(profiles('', 'LLM_DEFAULT_PROVIDER=nous\nIMAGEGEN_PROVIDER=recraft\n')).toBe('');
+  });
+
+  it('lets .env.worker override .env', () => {
+    expect(profiles('IMAGEGEN_PROVIDER=local\nLLM_DEFAULT_PROVIDER=ollama\n', 'IMAGEGEN_PROVIDER=fal\nLLM_DEFAULT_PROVIDER=nous\n')).toBe('');
   });
 });

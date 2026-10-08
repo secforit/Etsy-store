@@ -1,8 +1,9 @@
 # Models
 
-Every model runs **locally** on `secforit-home` (NVIDIA RTX 3060 12 GB, Ampere sm_86, driver 595 / CUDA 13.2,
-61 GiB RAM). Each one allows commercial use of the model and of what it produces, which the shop needs. Cloud fallbacks
-(Anthropic for agents, Recraft for images) stay off unless configured; see "How to swap".
+By default every model runs **locally** on `secforit-home` (NVIDIA RTX 3060 12 GB, Ampere sm_86, driver 595 / CUDA
+13.2, 61 GiB RAM). Each one allows commercial use of the model and of what it produces, which the shop needs. The same
+jobs can run in the cloud instead (Nous Research for the agents, fal.ai for the images; see "Cloud models" below), with
+Anthropic and Recraft as further options; all of them stay off unless configured.
 
 Checked on 2026-10-06 against the model cards, licence files and library sources linked below.
 
@@ -133,6 +134,24 @@ kernels for sm_75/80/86/90; runs on the host's CUDA 13.2 driver), torchvision 0.
 spandrel 0.4.2, timm 1.0.30, kornia 0.8.3, einops 0.8.2 (the last three are imported by BiRefNet's code). Base image:
 `nvidia/cuda:13.0.3-runtime-ubuntu24.04` (pinned by digest in `apps/imagegen/Dockerfile`).
 
+## Cloud models (Nous Research, fal.ai)
+
+Set in `.env.worker`; `docs/RUNBOOK.md` section 6 has the steps, and `worker check-cloud` checks keys and models.
+
+| Job | Provider | Endpoint / model | Notes |
+| --- | --- | --- | --- |
+| Agents (text + JSON) | Nous Research inference API (Nous Portal), `LLM_DEFAULT_PROVIDER=nous` or per agent in `LLM_ROUTES` | `NOUS_MODEL_LARGE`, `NOUS_MODEL_SMALL` (Portal ids, `<vendor>/<model>`) | OpenAI-compatible `/chat/completions`; JSON schema requested where the model supports it, otherwise prompt-only JSON, always validated with one repair turn. Priced from the Portal catalog. |
+| QA / compliance image look | same | `NOUS_MODEL_VISION` | Must accept images; `check-cloud` lists the image-capable models in your catalog. |
+| Raw art | fal.ai, `IMAGEGEN_PROVIDER=fal` | `fal-ai/flux-2/klein/4b` | The same FLUX.2 [klein] 4B as the sidecar (Apache 2.0), 4 steps, same prompt and sizes. |
+| Transparent background | fal.ai | `fal-ai/birefnet/v2`, "General Use (Light)" at 1024×1024 | BiRefNet (general), as in the sidecar. |
+| Upscale to print size | fal.ai | `fal-ai/esrgan`, `RealESRGAN_x4plus`, scale 2 or 4, tiled | Alpha is kept (re-applied from the edit if the output loses it). |
+
+Licences: the fal endpoints run the open-weight models listed above; use of the API itself falls under fal's terms.
+On the Nous Portal the licence depends on the model you pick: read its model card for commercial use before setting it.
+The API shapes were taken from the providers' own code (Nous Research's Hermes Agent, fal's official JS client) because
+their documentation sites were not reachable when this was built; run `check-cloud` and watch the first real design
+and QA jobs in live mode before raising any cap.
+
 ## How to swap
 
 Always check the licence first (model and outputs, commercial use), then the VRAM budget (≤ 12 GB with Ollama
@@ -152,7 +171,10 @@ unloaded), then run the pipeline in mock mode and on one real product before goi
   `black-forest-labs/FLUX.2-klein-base-4B`, also Apache 2.0, which needs more steps: change `flux_steps` and
   `flux_guidance` in `config.py`). Any other architecture needs a new `Generator` implementation in
   `apps/imagegen/src/imagegen/` behind the same interface (`interfaces.py`) and a factory in `real.py`.
-- **Cloud images:** `IMAGEGEN_PROVIDER=recraft` + `RECRAFT_API_KEY` (no sidecar needed; costs per image).
+- **Cloud agents on open models:** `LLM_DEFAULT_PROVIDER=nous` (or per agent in `LLM_ROUTES`) + `NOUS_API_KEY`,
+  `NOUS_MODEL_LARGE`, `NOUS_MODEL_SMALL`, `NOUS_MODEL_VISION` ("Cloud models" above).
+- **Cloud images:** `IMAGEGEN_PROVIDER=fal` + `FAL_KEY` (the sidecar's models on fal.ai, costs per call), or
+  `IMAGEGEN_PROVIDER=recraft` + `RECRAFT_API_KEY` (no sidecar needed; costs per image).
 - **Matting:** `IMAGEGEN_BIREFNET_REPO` + `IMAGEGEN_BIREFNET_REVISION` (another BiRefNet variant from the same author,
   for example a lite or HR checkpoint; review the remote code at that commit first).
 - **Upscaler:** `IMAGEGEN_ESRGAN_URL` (https) + `IMAGEGEN_ESRGAN_SHA256` (+ optionally `IMAGEGEN_ESRGAN_PATH`). Any

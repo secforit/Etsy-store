@@ -158,6 +158,8 @@ export const SERVICE_LIMITS = {
   marker: { capacity: 2, refillPerSecond: 1 },
   pinterest: { capacity: 2, refillPerSecond: 1 },
   recraft: { capacity: 2, refillPerSecond: 1 },
+  /** fal.ai queue: submit + status polls + result; one job at a time, so this only smooths bursts. */
+  fal: { capacity: 5, refillPerSecond: 2 },
 } as const;
 
 export function createServiceBucket(service: keyof typeof SERVICE_LIMITS, clock: Clock = systemClock): TokenBucket {

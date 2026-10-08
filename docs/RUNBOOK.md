@@ -6,8 +6,8 @@ root (for example `~/etsy-agents`) as your normal user, after it has been added 
 | | |
 | --- | --- |
 | Host | `secforit-home`: Ubuntu 26.04 LTS, i9-12900K, 61 GiB RAM, RTX 3060 12 GB (driver 595, CUDA 13.2), LAN 10.2.3.2/24, Tailscale up |
-| Text models | `gemma4:12b` on Ollama, every agent, vision included (about 8 GB VRAM at 16k context) |
-| Image models | FLUX.2 [klein] 4B + BiRefNet + Real-ESRGAN x4plus in the `imagegen` sidecar (CPU offload) |
+| Text models | `gemma4:12b` on Ollama, every agent, vision included (about 8 GB VRAM at 16k context); or Nous Research (cloud, section 6) |
+| Image models | FLUX.2 [klein] 4B + BiRefNet + Real-ESRGAN x4plus in the `imagegen` sidecar (CPU offload); or the same models on fal.ai (cloud, section 6) |
 | Reached at | `https://secforit-home.<tailnet>.ts.net` through `tailscale serve`, from your tailnet devices only |
 | Public ports | none. The desk listens on `127.0.0.1:3000`; nothing else is published |
 
@@ -21,14 +21,19 @@ for every command below.
 | Service | What it does | GPU | Network | Data |
 | --- | --- | --- | --- | --- |
 | `postgres` | Database (`postgres:16.15-alpine3.24`, pinned by digest, uid 70) | no | backend | volume `pgdata` |
-| `ollama` | Local LLM server, one model loaded, one request at a time | yes | backend | volume `ollama` |
-| `imagegen` | FLUX.2 klein 4B / BiRefNet / Real-ESRGAN sidecar, bearer token required, offline | yes | backend | volume `hf-models` (`/models`) |
+| `ollama` | Local LLM server, one model loaded, one request at a time. Only when an agent routes to Ollama | yes | backend | volume `ollama` |
+| `imagegen` | FLUX.2 klein 4B / BiRefNet / Real-ESRGAN sidecar, bearer token required, offline. Only for local art | yes | backend | volume `hf-models` (`/models`) |
 | `migrate` | One-shot: SQL migrations, before worker and desk start | no | backend | |
 | `worker` | The orchestrator: one job at a time, daily trend scan, hourly analyze | no | backend, egress | volume `blobs` |
 | `desk` | Approval desk (Next.js) on `127.0.0.1:3000` | no | backend, egress | volume `blobs` |
 | `init-volumes` | One-shot: gives the `blobs` and `ollama` volumes to uid 1000 | no | none | |
 | `ollama-pull` | One-shot (profile `setup`): downloads `gemma4:12b` into the `ollama` volume | no | egress | volume `ollama` |
 | `imagegen-download` | One-shot (profile `setup`): downloads the pinned sidecar weights | no | egress | volume `hf-models` |
+
+`ollama` and `imagegen` sit in Compose profiles of the same name. `compose.sh` turns on only the ones your
+configuration uses (`deploy/profiles.sh` reads `.env` and `.env.worker`): both for the default all-local setup,
+neither when the agents run on Nous Research and the images on fal.ai (section 6). A `COMPOSE_PROFILES` set in your
+shell overrides the choice.
 
 `backend` is an internal network (no internet). `egress` gives outbound internet only to what needs it at run
 time: the worker (Etsy, Printify, Marker, optional cloud APIs) and the desk (Etsy, Printify). Postgres, Ollama and
@@ -171,9 +176,52 @@ first start exercises the whole stack without touching any external account.
 ```
 
 Expected: `postgres`, `ollama`, `worker` and `desk` healthy; `imagegen` running (healthy once its own check
-passes); `init-volumes` and `migrate` exited with code 0.
+passes); `init-volumes` and `migrate` exited with code 0. With cloud models (section 6) `ollama` and `imagegen`
+are not started at all.
 
-## 6. Download the models
+## 6. Download the models (or use cloud models)
+
+### Cloud models instead of the GPU: Nous Research (text) and fal.ai (images)
+
+The agents can run on open models through the Nous Research inference API (Nous Portal), and the images on fal.ai,
+which hosts the same FLUX.2 [klein] 4B, BiRefNet and Real-ESRGAN models as the local sidecar. Then the server needs
+no GPU: skip section 3 and the downloads below. You can also mix, for example keep `compliance_guard` on Ollama with
+`LLM_ROUTES='{"compliance_guard":"ollama"}'`; `compose.sh` starts exactly the GPU services the mix uses.
+
+1. Create a key at portal.nousresearch.com and one at fal.ai (dashboard, keys).
+2. In `.env.worker`:
+
+   ```
+   LLM_DEFAULT_PROVIDER=nous
+   NOUS_API_KEY=...
+   NOUS_MODEL_LARGE=<vendor/model>          # e.g. nousresearch/hermes-4-405b; check-cloud confirms the ids
+   NOUS_MODEL_SMALL=<vendor/model>
+   NOUS_MODEL_VISION=<vendor/model>         # must accept images (final compliance look, QA mockup check)
+   IMAGEGEN_PROVIDER=fal
+   FAL_KEY=...
+   # IMAGEGEN_TOKEN=                        # comment it out: no sidecar runs
+   ```
+
+3. Check the keys and models before the first job, then start:
+
+   ```bash
+   ./deploy/compose.sh run --rm --no-deps worker check-cloud   # key accepted, models found, prices, image support
+   ./deploy/compose.sh up -d
+   ./deploy/compose.sh ps                                      # no ollama, no imagegen
+   ```
+
+Costs: every cloud call counts against the daily spend cap and the cost per listing (Rollout, Gate 3). Nous calls
+are priced from the Portal's own catalog (`check-cloud` prints the rates; `LLM_PRICES_JSON` overrides them; a model
+without a price is billed at a deliberately high fallback rate, never $0). fal calls are counted per call with
+`FAL_COST_PER_IMAGE_USD`, `FAL_COST_PER_BACKGROUND_REMOVAL_USD` and `FAL_COST_PER_UPSCALE_USD` (`.env.worker`); the
+defaults are set high on purpose, so put in your real fal prices. Mock mode stays fully offline either way.
+
+What leaves the server: prompts, trend keywords and product copy go to Nous; mockup and design images go to Nous
+(vision checks) and fal (as inline data, nothing is uploaded to fal storage). The untrusted-data rules and the
+code-side checks are the same as with local models. Results are read only from fal's queue and media hosts
+(allowlisted). Both keys live only in `.env.worker`.
+
+### Local models
 
 Ollama and the sidecar have no internet access. Each download runs in a one-shot setup service (profile
 `setup`), the only containers on the `egress` network besides worker and desk; it writes into the same model
@@ -321,8 +369,9 @@ such write is in the audit log. Then open the desk, review Settings (caps, block
 
 ### Going-live checklist
 
-- [ ] `docker run --rm --gpus all ubuntu:24.04 nvidia-smi` shows the RTX 3060
-- [ ] `check-gpu` says `GPU stack: READY`; `imagegen-download ... --check` passes (the sidecar stays offline)
+- [ ] Local models: `docker run --rm --gpus all ubuntu:24.04 nvidia-smi` shows the RTX 3060
+- [ ] `check-gpu` says `GPU stack: READY`; with the local sidecar, `imagegen-download ... --check` passes (it stays offline)
+- [ ] Cloud models: `check-cloud` says `Cloud providers: READY`, and `FAL_COST_*` match your fal prices
 - [ ] `demo` exits 0
 - [ ] Mock data wiped (fresh `pgdata` and `blobs` volumes) before `MODE=live`
 - [ ] `./deploy/check-env.sh` prints nothing (env files mode 600, every secret in its own file), the password hash
@@ -408,7 +457,7 @@ the last rotation, get a new one (section 9).
 | `ETSY_REFRESH_TOKEN` | New token with the PKCE flow (section 9). The stored rotated token belongs to the old value and is ignored automatically. To cut off the old grant, also revoke the app's access in your Etsy account. | `./deploy/compose.sh up -d worker desk` |
 | `ETSY_API_KEY` / `ETSY_SHARED_SECRET` | Etsy developer portal; a new keystring also needs a new refresh token | `up -d worker desk` |
 | `PRINTIFY_API_TOKEN` | Create a new token in Printify, put it in `.env`, then delete the old one | `up -d worker desk` |
-| `MARKER_API_*`, `PINTEREST_ACCESS_TOKEN`, `ANTHROPIC_API_KEY`, `RECRAFT_API_KEY` | Issue the new value at the provider, update `.env.worker`, revoke the old one | `up -d worker` |
+| `MARKER_API_*`, `PINTEREST_ACCESS_TOKEN`, `NOUS_API_KEY`, `FAL_KEY`, `ANTHROPIC_API_KEY`, `RECRAFT_API_KEY` | Issue the new value at the provider, update `.env.worker`, revoke the old one | `up -d worker` |
 | `HF_TOKEN` | New read-only token on huggingface.co into `.env.imagegen`, revoke the old one | nothing (read only by `imagegen-download`) |
 
 After any change: `./deploy/compose.sh run --rm --no-deps worker check-gpu` and `... worker status`.
@@ -444,9 +493,12 @@ nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv
 | --- | --- |
 | `check-env: ... is readable by group/others` | `chmod 600` on the file it names |
 | `check-env: <KEY> belongs in .env.worker` (or `.env.desk`, `.env.imagegen`) | Move that line to the named file (section 4), then rerun. |
-| `required variable POSTGRES_PASSWORD (or IMAGEGEN_TOKEN) is missing a value` | Fill `POSTGRES_PASSWORD` in `.env` and `IMAGEGEN_TOKEN` in `.env.worker` (section 4). |
+| `required variable POSTGRES_PASSWORD is missing a value` | Fill `POSTGRES_PASSWORD` in `.env` (section 4). |
+| `check-env: IMAGEGEN_TOKEN in .env.worker is missing ...` | The local imagegen sidecar runs (`IMAGEGEN_PROVIDER=local`): fill `IMAGEGEN_TOKEN` (section 4), or switch to `IMAGEGEN_PROVIDER=fal` (section 6). |
+| Worker log `nous ...: HTTP 401 API key rejected`, `HTTP 402 payment required` or `HTTP 404 model or route not found` | Key, Portal balance, or a `NOUS_MODEL_*` id that is not in your catalog: run `check-cloud`, fix `.env.worker`, then `retry-failed`. |
+| `fal: the safety checker flagged the generated image` | fal refused the art for this concept; the design job fails after its retries. Reject or rework the concept; adding the term to the blocklist stops similar ones. |
 | `Invalid environment: <KEY>: ...` in worker or desk logs | That key is empty, malformed, or missing from the container's env file. Comment out unused keys; single-quote JSON and the password hash. |
-| Worker exits with `LLM_PRICES_JSON has no price for the cloud model(s) ...` | A route uses Anthropic in live mode without a price: add every `ANTHROPIC_MODEL_*` id to `LLM_PRICES_JSON` in `.env.worker`, or route the agents back to Ollama. |
+| Worker exits with `LLM_PRICES_JSON has no price for the cloud model(s) ...` | A route uses Anthropic in live mode without a price: add every `ANTHROPIC_MODEL_*` id to `LLM_PRICES_JSON` in `.env.worker`, or route the agents back to Ollama. (Nous models are priced from the Portal catalog.) |
 | `migrate` exits non-zero, `password authentication failed` | `.env` password differs from the one Postgres was created with. Use the original, or change it (section 12). |
 | Desk sign-in works but every change is refused | `DESK_ORIGIN` is not exactly the URL in the browser (scheme, host, no trailing slash). |
 | `worker` unhealthy | The process stopped writing its heartbeat: `./deploy/compose.sh logs --tail 200 worker`, then `./deploy/compose.sh restart worker`. |

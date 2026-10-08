@@ -148,6 +148,55 @@ describe('runOnce gates', () => {
     expect(cloudAgentsFor({ MODE: 'mock', LLM_DEFAULT_PROVIDER: 'anthropic', LLM_ROUTES: {} })).toEqual([]);
   });
 
+  it('counts Nous agents as cloud, and with fal both the Designer (art) and QA (upscaling)', () => {
+    expect(cloudAgentsFor({ MODE: 'live', LLM_DEFAULT_PROVIDER: 'ollama', LLM_ROUTES: { analyst: 'nous' } })).toEqual(['analyst']);
+    expect(cloudAgentsFor({ MODE: 'live', LLM_DEFAULT_PROVIDER: 'nous', LLM_ROUTES: {} })).toHaveLength(7);
+    expect(cloudAgentsFor({ MODE: 'live', LLM_DEFAULT_PROVIDER: 'ollama', LLM_ROUTES: {}, IMAGEGEN_PROVIDER: 'fal' })).toEqual(['designer', 'qa_publisher']);
+  });
+
+  it('meters fal image work per call: art plus background removal for transparent products, art only for posters', async () => {
+    const h = await harness({ costUsd: 0 });
+    const orch = new Orchestrator(h.deps, { cloudAgents: ['designer'], imageGenCostUsd: 0.02, imageBackgroundCostUsd: 0.01 });
+    for (const productType of ['tshirt', 'poster'] as const) {
+      const id = await seedProduct(db, h.clock.now(), { state: 'cleared', productType });
+      await enqueue(db, { kind: 'design', productId: id, idempotencyKey: productStepKey('design', id, 0) }, h.clock.now());
+    }
+    await orch.runUntilIdle();
+    const { rows } = await db.query<{ agent: string; model: string; cost_usd: unknown }>(
+      'SELECT agent, model, cost_usd FROM agent_runs WHERE cost_usd > 0 ORDER BY cost_usd DESC',
+    );
+    expect(rows.map((r) => [r.agent, r.model, Number(r.cost_usd)])).toEqual([
+      ['designer', 'image:fake-flux', 0.03],
+      ['designer', 'image:fake-flux', 0.02],
+    ]);
+  });
+
+  it('meters cloud upscales in QA, also when the job fails after the upscale was paid', async () => {
+    const h = await harness({ qa: (_input, call) => (call === 0 ? 'throw' : 'drafted') });
+    h.integrations.upscaler = { upscale: async (bytes) => bytes };
+    const orch = new Orchestrator(h.deps, { cloudAgents: [], upscaleCostUsd: 0.02, qaPublish: { sleep: async () => {} } });
+    const [id] = await finalCleared(h, 1);
+    expect((await orch.runOnce()).status).toBe('ran'); // upscaled, then Printify failed: retried later
+    h.clock.advance(10 * 60_000);
+    await orch.runUntilIdle();
+    expect((await productState(db, id!)).state).toBe('drafted');
+    const { rows } = await db.query<{ agent: string; model: string; cost_usd: unknown }>('SELECT agent, model, cost_usd FROM agent_runs WHERE cost_usd > 0');
+    expect(rows.map((r) => [r.agent, r.model, Number(r.cost_usd)])).toEqual([
+      ['qa_publisher', 'image:upscale', 0.02],
+      ['qa_publisher', 'image:upscale', 0.02],
+    ]);
+  });
+
+  it('records nothing for the local sidecar upscaler (no upscale price configured)', async () => {
+    const h = await harness();
+    h.integrations.upscaler = { upscale: async (bytes) => bytes };
+    const orch = new Orchestrator(h.deps, { cloudAgents: [], qaPublish: { sleep: async () => {} } });
+    await finalCleared(h, 1);
+    await orch.runUntilIdle();
+    const { rows } = await db.query<{ n: unknown }>(`SELECT count(*) AS n FROM agent_runs WHERE model = 'image:upscale'`);
+    expect(Number(rows[0]!.n)).toBe(0);
+  });
+
   it('fails a job after max attempts with backoff in between', async () => {
     const h = await harness({ throwFrom: { trendScout: () => new Error('flaky') } });
     await enqueue(db, { kind: 'trend_scan', idempotencyKey: 'flaky' }, h.clock.now());

@@ -8,6 +8,15 @@ import { z } from 'zod';
 
 const nonEmpty = z.string().trim().min(1);
 
+/** Where each agent's LLM calls go. `ollama` is local (GPU, $0); `anthropic` and `nous` are cloud APIs (paid). */
+export const LLM_PROVIDERS = ['ollama', 'anthropic', 'nous'] as const;
+export type LlmProviderName = (typeof LLM_PROVIDERS)[number];
+export const CLOUD_LLM_PROVIDERS: readonly LlmProviderName[] = ['anthropic', 'nous'];
+
+/** Where design art comes from. `local` is the imagegen GPU sidecar; `recraft` and `fal` are cloud APIs (paid). */
+export const IMAGEGEN_PROVIDERS = ['local', 'recraft', 'fal'] as const;
+export type ImagegenProviderName = (typeof IMAGEGEN_PROVIDERS)[number];
+
 const EnvObjectSchema = z
   .object({
     MODE: z.enum(['mock', 'live']).default('mock'),
@@ -23,17 +32,17 @@ const EnvObjectSchema = z
      * LLM routing. Default: every agent runs on the local Ollama server on Razvan's RTX 3060.
      * LLM_ROUTES overrides per agent, e.g. {"compliance_guard":"anthropic"}.
      */
-    LLM_DEFAULT_PROVIDER: z.enum(['ollama', 'anthropic']).default('ollama'),
+    LLM_DEFAULT_PROVIDER: z.enum(LLM_PROVIDERS).default('ollama'),
     LLM_ROUTES: z
       .string()
       .optional()
       .transform((s, ctx) => {
-        if (!s) return {} as Record<string, 'ollama' | 'anthropic'>;
+        if (!s) return {} as Record<string, LlmProviderName>;
         try {
-          const parsed = z.record(z.string(), z.enum(['ollama', 'anthropic'])).parse(JSON.parse(s));
+          const parsed = z.record(z.string(), z.enum(LLM_PROVIDERS)).parse(JSON.parse(s));
           return parsed;
         } catch {
-          ctx.addIssue({ code: 'custom', message: 'LLM_ROUTES must be JSON like {"compliance_guard":"anthropic"}' });
+          ctx.addIssue({ code: 'custom', message: `LLM_ROUTES must be JSON like {"compliance_guard":"nous"} (providers: ${LLM_PROVIDERS.join(', ')})` });
           return z.NEVER;
         }
       }),
@@ -52,7 +61,7 @@ const EnvObjectSchema = z
     ANTHROPIC_MODEL_SMALL: nonEmpty.optional(),
 
     /** Image generation: 'local' = the imagegen GPU sidecar (FLUX.2 klein 4B + BiRefNet + Real-ESRGAN). */
-    IMAGEGEN_PROVIDER: z.enum(['local', 'recraft']).default('local'),
+    IMAGEGEN_PROVIDER: z.enum(IMAGEGEN_PROVIDERS).default('local'),
     IMAGEGEN_BASE_URL: z.url().default('http://imagegen:8000'),
     /** Shared secret the worker sends to the imagegen sidecar (internal network, defence in depth). */
     IMAGEGEN_TOKEN: z.string().min(24).optional(),
@@ -77,7 +86,34 @@ const EnvObjectSchema = z
     DESK_SESSION_SECRET: z.string().min(32).optional(),
     /** The desk's public origin, e.g. https://secforit-home.<tailnet>.ts.net (served over Tailscale). */
     DESK_ORIGIN: z.url().optional(),
+
+    /**
+     * Nous Research inference API (Nous Portal; OpenAI-compatible, open models). Only needed when an agent routes
+     * to 'nous'. Model ids are the Portal's (`<vendor>/<model>`); `check-cloud` lists the ones your key can use.
+     */
+    NOUS_API_KEY: nonEmpty.optional(),
+    NOUS_BASE_URL: z.url().default('https://inference-api.nousresearch.com/v1'),
+    NOUS_MODEL_LARGE: nonEmpty.optional(),
+    NOUS_MODEL_SMALL: nonEmpty.optional(),
+    /** Must accept images: the Compliance Guard (final look) and QA (mockups) send them. */
+    NOUS_MODEL_VISION: nonEmpty.optional(),
+
+    /** fal.ai (IMAGEGEN_PROVIDER=fal): FLUX.2 [klein] 4B art, BiRefNet backgrounds, Real-ESRGAN upscaling. */
+    FAL_KEY: nonEmpty.optional(),
   });
+
+/** The LLM provider that serves `agent` (LLM_ROUTES[agent], else LLM_DEFAULT_PROVIDER). */
+export function llmProviderFor(env: Pick<EnvShape, 'LLM_DEFAULT_PROVIDER' | 'LLM_ROUTES'>, agent: string): LlmProviderName {
+  return env.LLM_ROUTES[agent] ?? env.LLM_DEFAULT_PROVIDER;
+}
+
+/** True when the default or any per-agent route uses `provider`. */
+export function usesLlmProvider(env: Pick<EnvShape, 'LLM_DEFAULT_PROVIDER' | 'LLM_ROUTES'>, provider: LlmProviderName): boolean {
+  return env.LLM_DEFAULT_PROVIDER === provider || Object.values(env.LLM_ROUTES).includes(provider);
+}
+
+/** Agents that send images to their model (final compliance look, QA mockup check). */
+export const VISION_AGENTS = ['compliance_guard', 'qa_publisher'] as const;
 
 /**
  * Which process loads the environment (least privilege, see deploy/docker-compose.yml):
@@ -98,10 +134,13 @@ export function requiredLiveKeys(env: EnvShape, scope: EnvScope = 'all'): (keyof
   required.push('ETSY_API_KEY', 'ETSY_SHOP_ID', 'ETSY_REFRESH_TOKEN', 'PRINTIFY_API_TOKEN', 'PRINTIFY_SHOP_ID');
   if (scope === 'desk') return required;
   required.push('MARKER_API_USERNAME', 'MARKER_API_PASSWORD');
-  const usesAnthropic =
-    env.LLM_DEFAULT_PROVIDER === 'anthropic' || Object.values(env.LLM_ROUTES).includes('anthropic');
-  if (usesAnthropic) required.push('ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL_LARGE', 'ANTHROPIC_MODEL_SMALL');
+  if (usesLlmProvider(env, 'anthropic')) required.push('ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL_LARGE', 'ANTHROPIC_MODEL_SMALL');
+  if (usesLlmProvider(env, 'nous')) {
+    required.push('NOUS_API_KEY', 'NOUS_MODEL_LARGE', 'NOUS_MODEL_SMALL');
+    if (VISION_AGENTS.some((a) => llmProviderFor(env, a) === 'nous')) required.push('NOUS_MODEL_VISION');
+  }
   if (env.IMAGEGEN_PROVIDER === 'recraft') required.push('RECRAFT_API_KEY');
+  if (env.IMAGEGEN_PROVIDER === 'fal') required.push('FAL_KEY');
   if (env.IMAGEGEN_PROVIDER === 'local') required.push('IMAGEGEN_TOKEN');
   return required;
 }

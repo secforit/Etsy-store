@@ -112,13 +112,22 @@ export async function buildRuntime(env: Env, opts: RuntimeOptions = {}): Promise
     eurToUsd: settings.EUR_TO_USD,
   };
   const finalDb = db;
+  // Cloud image work is metered per call (mock mode and the local sidecar cost nothing).
+  const live = env.MODE === 'live';
+  const fal = live && env.IMAGEGEN_PROVIDER === 'fal';
   return {
     deps,
     settings,
     orchestratorOptions: {
       cloudAgents: cloudAgentsFor(env),
       reportIntervalMs: settings.ANALYST_REPORT_INTERVAL_HOURS * 3600_000,
-      imageGenCostUsd: env.MODE === 'live' && env.IMAGEGEN_PROVIDER === 'recraft' ? settings.RECRAFT_COST_PER_IMAGE_USD : 0,
+      imageGenCostUsd: fal
+        ? settings.FAL_COST_PER_IMAGE_USD
+        : live && env.IMAGEGEN_PROVIDER === 'recraft'
+          ? settings.RECRAFT_COST_PER_IMAGE_USD
+          : 0,
+      imageBackgroundCostUsd: fal ? settings.FAL_COST_PER_BACKGROUND_REMOVAL_USD : 0,
+      upscaleCostUsd: fal ? settings.FAL_COST_PER_UPSCALE_USD : 0,
     },
     async close() {
       if (ownsDb) await finalDb.close();

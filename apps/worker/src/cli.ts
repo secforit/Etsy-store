@@ -6,6 +6,7 @@
  *   setup-catalog    pin Printify blueprint/provider ids  [--type T --blueprint N --provider N] [--dry-run]
  *   hash-password    print DESK_PASSWORD_HASH (password from the terminal or stdin, never argv)
  *   check-gpu        Ollama /api/tags + imagegen /healthz; prints what is missing
+ *   check-cloud      Nous key + models (catalog, prices, images) and fal key; prints what is missing
  *   status           caps, spend, product and job counts
  *   retry-failed     requeue failed jobs  [--kind K] [--job ID]
  * Usage: tsx apps/worker/src/cli.ts <command>   (in Docker: node --import tsx apps/worker/src/cli.ts <command>)
@@ -16,12 +17,13 @@ import { loadEnv, type Env } from '@etsy-agents/core/config/env.ts';
 import { migrate } from '@etsy-agents/core/db/db.ts';
 import type { ProductType } from '@etsy-agents/core/domain/types.ts';
 import { cloudAgentsFor } from '@etsy-agents/core/orchestrator/caps.ts';
-import { scopeEnvForLoad } from '@etsy-agents/core/orchestrator/config.ts';
+import { loadOrchestratorEnv, scopeEnvForLoad } from '@etsy-agents/core/orchestrator/config.ts';
 import { createLogger, errorMessage } from '@etsy-agents/core/orchestrator/logger.ts';
 import { Orchestrator } from '@etsy-agents/core/orchestrator/orchestrator.ts';
 import { buildRuntime, openDb } from '@etsy-agents/core/orchestrator/runtime.ts';
 import { scheduleDue } from '@etsy-agents/core/orchestrator/scheduler.ts';
 import { flagInt, flagString, parseArgs } from './args.ts';
+import { checkCloud, printCloudCheck } from './commands/checkCloud.ts';
 import { checkGpu, printGpuCheck } from './commands/checkGpu.ts';
 import { runDemo } from './commands/demo.ts';
 import { hashPasswordCommand, readPassword } from './commands/hashPassword.ts';
@@ -37,6 +39,7 @@ export const USAGE = `Usage: cli <command>
   setup-catalog [--type T] [--blueprint N --provider N] [--dry-run]
   hash-password [--cost N]        read a password (terminal or stdin) and print DESK_PASSWORD_HASH
   check-gpu                       check Ollama models and the imagegen sidecar
+  check-cloud                     check the Nous key and models, and the fal key
   status                          caps, spend, products, jobs
   retry-failed [--kind K] [--job ID]`;
 
@@ -142,6 +145,13 @@ export async function main(argv: readonly string[], ctx: CliContext = { io: cons
       const env = getEnv();
       const res = await checkGpu(env);
       printGpuCheck(io, env, res);
+      return res.ok ? 0 : 1;
+    }
+
+    case 'check-cloud': {
+      const env = getEnv();
+      const res = await checkCloud(env);
+      printCloudCheck(io, env, loadOrchestratorEnv(ctx.rawEnv ?? process.env), res);
       return res.ok ? 0 : 1;
     }
 
